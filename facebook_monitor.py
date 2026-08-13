@@ -354,7 +354,7 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
             let imgs = Array.from(e.querySelectorAll('img'));
             for (let img of imgs) {
                 let src = img.src || img.getAttribute('data-src') || '';
-                if ((src.includes('scontent') || src.includes('fbcdn')) && 
+                if ((src.includes('scontent') || src.includes('fbcdn') || src.includes('external')) && 
                     !src.includes('rsrc.php') && !src.includes('emoji.php') && 
                     !src.includes('p50x50') && !src.includes('p160x160')) {
                     return src;
@@ -368,7 +368,7 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
     post_url = target_url
     for link in all_links:
         href = await link.get_attribute('href') or ""
-        if any(keyword in href for keyword in ["/posts/", "/permalink", "pfbid", "story_fbid", "/photo", "/videos/", "/reel/"]):
+        if any(keyword in href for keyword in ["/posts/", "/permalink", "pfbid", "story_fbid", "/photo", "/videos/", "/reel/", "l.facebook.com"]):
             if not any(skip in href for skip in ["comment_id", "reply_comment_id", "/user/", "/friends/"]):
                 post_url = f"https://www.facebook.com{href}" if href.startswith('/') else href
                 break
@@ -378,20 +378,21 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
     """)
 
     lines = [line.strip() for line in clean_post_text.split('\n') if line.strip()]
-    lines = [l for l in lines if not re.match(r'^(المرصد السوري|الحدث السوري|\d+\s*د|\d+\s*س|\.)$', l)]
+    lines = [l for l in lines if not re.match(r'^(\d+\s*د|\d+\s*س|\.)$', l)]
     real_post_text = "\n".join(lines).strip()
 
-    if len(real_post_text) >= 20:
+    if len(real_post_text) >= 5:
         clean_post_text = real_post_text
     elif image_url:
         ocr_text = await extract_text_from_image_url(http_session, image_url)
         if ocr_text:
             clean_post_text = ocr_text
-    elif len(real_post_text) < 10:
-        if has_video:
-            clean_post_text = "[منشور يحتوي على فيديو فقط]"
         else:
-            return None, None, None, None, False
+            clean_post_text = "[منشور يحتوي على صورة/رابط بدون نص]"
+    elif has_video:
+        clean_post_text = "[منشور يحتوي على فيديو فقط]"
+    else:
+        return None, None, None, None, False
 
     normalized_text_payload = re.sub(r'\s+', '', clean_post_text).strip().lower()
     clean_img_key = image_url.split('?')[0] if image_url else ""
@@ -464,19 +465,25 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
             element_selector = 'div[role="feed"] > div, div[role="article"], div[data-pagelet*="FeedUnit"]'
 
             if first_run:
-                raw_elements = await page.query_selector_all(element_selector)
                 saved_initial = 0
-                for post_elem in raw_elements:
-                    post_id, text, post_url, img_url, has_video = await parse_single_post(post_elem, target_type, target_url, http_session)
-                    if not post_id:
-                        continue
-                    if not await is_post_exists(post_id):
-                        await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
-                        await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
-                        saved_initial += 1
+                for _ in range(3):
+                    raw_elements = await page.query_selector_all(element_selector)
+                    for post_elem in raw_elements:
+                        post_id, text, post_url, img_url, has_video = await parse_single_post(post_elem, target_type, target_url, http_session)
+                        if not post_id:
+                            continue
+                        if not await is_post_exists(post_id):
+                            await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
+                            await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
+                            saved_initial += 1
 
+                        if saved_initial >= 2:
+                            break
                     if saved_initial >= 2:
                         break
+                    await page.keyboard.press("PageDown")
+                    await page.wait_for_timeout(2000)
+
                 print(f"✅ Baseline established ({saved_initial} posts) for: {page_title}")
                 return
 
