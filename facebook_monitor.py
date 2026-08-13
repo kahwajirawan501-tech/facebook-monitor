@@ -125,7 +125,28 @@ async def init_db():
             created_at TIMESTAMP
         )
     ''')
+    await _ensure_posts_columns()
     print("🗄️ Connected to Turso and ensured `posts` table exists.")
+
+# أعمدة الجدول المطلوبة لعمل الكود الحالي. إن كان الجدول قد أُنشئ مسبقًا بمخطط أقدم/ناقص
+# (كما حدث هنا)، هذا يضيف أي عمود مفقود تلقائيًا بدل فشل كل استعلام لاحق.
+_REQUIRED_POSTS_COLUMNS = {
+    "text": "TEXT",
+    "post_url": "TEXT",
+    "image_url": "TEXT",
+    "video_url": "TEXT",
+    "target_type": "TEXT",
+    "target_url": "TEXT",
+    "created_at": "TIMESTAMP",
+}
+
+async def _ensure_posts_columns():
+    rows = await _turso_execute("PRAGMA table_info(posts)")
+    existing_cols = {r[1] for r in rows}  # r = (cid, name, type, notnull, dflt_value, pk)
+    for col, col_type in _REQUIRED_POSTS_COLUMNS.items():
+        if col not in existing_cols:
+            await _turso_execute(f"ALTER TABLE posts ADD COLUMN {col} {col_type}")
+            print(f"🔧 Added missing column `{col}` to `posts` table.")
 
 async def close_db():
     if db_session:
