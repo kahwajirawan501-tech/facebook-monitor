@@ -475,5 +475,23 @@ async def main():
                 print(f"💤 Waiting {CHECK_INTERVAL_SECONDS}s before next cycle...\n")
                 await asyncio.sleep(CHECK_INTERVAL_SECONDS)
 
+
+
+from flask import Flask
+import threading
+
+app = Flask(__name__)
+
+@app.route('/')
+def health_check():
+    return "FB Monitor is Active", 200
+
+def run_flask():
+    app.run(host="0.0.0.0", port=10000)
+
 if __name__ == "__main__":
+    # تشغيل خادم ويب خفيف لإرضاء Render ومنع إيقاف الخدمة
+    threading.Thread(target=run_flask, daemon=True).start()
+    
+    # تشغيل سكربت الرصد الرئيسي الخاص بك
     asyncio.run(main())
