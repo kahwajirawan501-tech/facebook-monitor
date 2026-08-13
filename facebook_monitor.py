@@ -2,6 +2,7 @@ import os
 import re
 import io
 import asyncio
+import sqlite3
 import hashlib
 import warnings
 from datetime import datetime
@@ -9,7 +10,6 @@ from urllib.parse import urlparse, urljoin
 
 import aiohttp
 import aiofiles
-from dotenv import load_dotenv
 from playwright.async_api import async_playwright
 import easyocr
 from PIL import Image
@@ -18,31 +18,22 @@ from PIL import Image
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# ==================== ⚙️ CONFIGURATION (from environment / .env) ====================
-load_dotenv()
+# ==================== ⚙️ CONFIGURATION ====================
+TARGET_URLS = [
+    "https://www.facebook.com/syriahr",
+    "https://www.facebook.com/AlHadathSyria",
+    "https://www.facebook.com/syriahro"
+]
 
-def _get_env(name, required=True, default=None):
-    val = os.environ.get(name, default)
-    if required and not val:
-        raise RuntimeError(f"❌ متغير البيئة المطلوب غير موجود: {name}")
-    return val
+TELEGRAM_BOT_TOKEN = "6445446101:AAGSjIdYPkmiOpDJ0qTaTwyzKNN4s2Musfg"
+TELEGRAM_CHAT_ID = "-1004348269004"
 
-TARGET_URLS = [u.strip() for u in _get_env("TARGET_URLS").split(",") if u.strip()]
+MAX_CONCURRENT_TASKS = 3      # عدد الصفحات التي يتم فحصها بالتوازي بنفس الوقت
+CHECK_INTERVAL_SECONDS = 120  # الوقت بالثواني بين كل دورة رصد كاملة
 
-TELEGRAM_BOT_TOKEN = _get_env("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = _get_env("TELEGRAM_CHAT_ID")
-
-TURSO_DATABASE_URL = _get_env("TURSO_DATABASE_URL")   # مثال: libsql://your-db-name-org.turso.io
-TURSO_AUTH_TOKEN = _get_env("TURSO_AUTH_TOKEN")
-
-MAX_CONCURRENT_TASKS = int(_get_env("MAX_CONCURRENT_TASKS", required=False, default="3"))
-CHECK_INTERVAL_SECONDS = int(_get_env("CHECK_INTERVAL_SECONDS", required=False, default="120"))
-
-# RUN_ONCE=true → دورة فحص واحدة ثم خروج (مناسب لـ GitHub Actions / Render Cron Job)
-RUN_ONCE = _get_env("RUN_ONCE", required=False, default="false").lower() in ("1", "true", "yes")
-
-USER_DATA_DIR = os.path.abspath(_get_env("USER_DATA_DIR", required=False, default="user_data"))
-DOWNLOAD_DIR = _get_env("DOWNLOAD_DIR", required=False, default="downloads")
+DB_NAME = "facebook_monitor.db"
+USER_DATA_DIR = os.path.abspath("user_data")
+DOWNLOAD_DIR = "downloads"
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
@@ -50,66 +41,12 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 print("⏳ Initializing EasyOCR Engine for Arabic & English text extraction...")
 ocr_reader = easyocr.Reader(['ar', 'en'], gpu=False)
 
-# ==================== 🗄️ TURSO DATABASE LAYER (raw HTTP, no libsql-client) ====================
-db_session: aiohttp.ClientSession | None = None
-TURSO_PIPELINE_URL: str | None = None
-
-def _to_http_url(url: str) -> str:
-    if url.startswith("libsql://"):
-        return "https://" + url[len("libsql://"):]
-    if url.startswith("ws://"):
-        return "http://" + url[len("ws://"):]
-    return url
-
-def _hrana_value(v):
-    if v is None:
-        return {"type": "null"}
-    if isinstance(v, bool):
-        return {"type": "integer", "value": "1" if v else "0"}
-    if isinstance(v, int):
-        return {"type": "integer", "value": str(v)}
-    if isinstance(v, float):
-        return {"type": "float", "value": v}
-    return {"type": "text", "value": str(v)}
-
-def _unwrap_row(row):
-    out = []
-    for cell in row:
-        t = cell.get("type")
-        if t == "null":
-            out.append(None)
-        elif t == "integer":
-            out.append(int(cell["value"]))
-        elif t == "float":
-            out.append(float(cell["value"]))
-        else:
-            out.append(cell.get("value"))
-    return out
-
-async def _turso_execute(sql, args=None):
-    payload = {
-        "requests": [
-            {"type": "execute", "stmt": {"sql": sql, "args": [_hrana_value(a) for a in (args or [])]}},
-            {"type": "close"},
-        ]
-    }
-    headers = {"Authorization": f"Bearer {TURSO_AUTH_TOKEN}"}
-    async with db_session.post(TURSO_PIPELINE_URL, json=payload, headers=headers, timeout=20) as resp:
-        data = await resp.json()
-        if resp.status != 200:
-            raise RuntimeError(f"Turso HTTP {resp.status}: {data}")
-        first = data["results"][0]
-        if first.get("type") != "ok":
-            raise RuntimeError(f"Turso query error: {first}")
-        result = first["response"]["result"]
-        return [_unwrap_row(r) for r in result.get("rows", [])]
-
-async def init_db():
-    global db_session, TURSO_PIPELINE_URL
-    base = _to_http_url(TURSO_DATABASE_URL).rstrip("/")
-    TURSO_PIPELINE_URL = f"{base}/v2/pipeline"
-    db_session = aiohttp.ClientSession()
-    await _turso_execute('''
+# ==================== 🗄️ ASYNC SAFE DATABASE MANAGEMENT ====================
+def init_db():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('PRAGMA journal_mode=WAL;')
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS posts (
             id TEXT PRIMARY KEY,
             text TEXT,
@@ -121,55 +58,53 @@ async def init_db():
             created_at TIMESTAMP
         )
     ''')
-    await _ensure_posts_columns()
-    print("🗄️ Connected to Turso and ensured `posts` table exists.")
-
-_REQUIRED_POSTS_COLUMNS = {
-    "text": "TEXT",
-    "post_url": "TEXT",
-    "image_url": "TEXT",
-    "video_url": "TEXT",
-    "target_type": "TEXT",
-    "target_url": "TEXT",
-    "created_at": "TIMESTAMP",
-}
-
-async def _ensure_posts_columns():
-    rows = await _turso_execute("PRAGMA table_info(posts)")
-    existing_cols = {r[1] for r in rows}
-    for col, col_type in _REQUIRED_POSTS_COLUMNS.items():
-        if col not in existing_cols:
-            await _turso_execute(f"ALTER TABLE posts ADD COLUMN {col} {col_type}")
-            print(f"🔧 Added missing column `{col}` to `posts` table.")
-
-async def close_db():
-    if db_session:
-        await db_session.close()
+    conn.commit()
+    conn.close()
 
 async def is_db_empty_for_target(target_url):
-    rows = await _turso_execute('SELECT COUNT(*) FROM posts WHERE target_url = ?', [target_url])
-    return rows[0][0] == 0
+    def _query():
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM posts WHERE target_url = ?', (target_url,))
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count == 0
+    return await asyncio.to_thread(_query)
 
 async def is_post_exists(post_id):
-    rows = await _turso_execute('SELECT 1 FROM posts WHERE id = ?', [post_id])
-    return len(rows) > 0
+    def _query():
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute('SELECT 1 FROM posts WHERE id = ?', (post_id,))
+        result = cursor.fetchone()
+        conn.close()
+        return result is not None
+    return await asyncio.to_thread(_query)
 
 async def is_content_duplicate(clean_text):
     if not clean_text or len(clean_text) < 10:
         return False
-    rows = await _turso_execute(
-        'SELECT 1 FROM posts WHERE text = ? ORDER BY created_at DESC LIMIT 30', [clean_text]
-    )
-    return len(rows) > 0
+    def _query():
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute('SELECT 1 FROM posts WHERE text = ? ORDER BY created_at DESC LIMIT 30', (clean_text,))
+        result = cursor.fetchone()
+        conn.close()
+        return result is not None
+    return await asyncio.to_thread(_query)
 
 async def save_post_to_db(post_id, text, post_url, image_url, video_url, target_type, target_url):
-    await _turso_execute(
-        '''INSERT INTO posts (id, text, post_url, image_url, video_url, target_type, target_url, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-        [post_id, text, post_url, image_url, video_url, target_type, target_url,
-         datetime.now().strftime('%Y-%m-%d %H:%M:%S')]
-    )
-    print(f"💾 Saved [{post_id[:8]}] to Turso!")
+    def _insert():
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO posts (id, text, post_url, image_url, video_url, target_type, target_url, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (post_id, text, post_url, image_url, video_url, target_type, target_url, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+        conn.commit()
+        conn.close()
+    await asyncio.to_thread(_insert)
+    print(f"💾 Saved [{post_id[:8]}] to Database!")
 
 # ==================== ✈️ ASYNC TELEGRAM BOT CLIENT ====================
 async def send_to_telegram(session, page_title, text, post_url, image_url=None, has_video=False):
@@ -186,7 +121,7 @@ async def send_to_telegram(session, page_title, text, post_url, image_url=None, 
         if image_url:
             temp_img_path = os.path.join(DOWNLOAD_DIR, f"tg_{hashlib.md5(image_url.encode()).hexdigest()[:8]}.jpg")
             headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-
+            
             try:
                 async with session.get(image_url, headers=headers, timeout=15) as img_resp:
                     if img_resp.status == 200:
@@ -195,7 +130,7 @@ async def send_to_telegram(session, page_title, text, post_url, image_url=None, 
                             await f.write(img_bytes)
 
                         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-
+                        
                         async with aiofiles.open(temp_img_path, 'rb') as f:
                             photo_data = await f.read()
 
@@ -204,11 +139,11 @@ async def send_to_telegram(session, page_title, text, post_url, image_url=None, 
                         data.add_field('caption', caption)
                         data.add_field('parse_mode', 'Markdown')
                         data.add_field('photo', photo_data, filename="image.jpg")
-
+                        
                         async with session.post(url, data=data, timeout=20) as resp:
                             if resp.status == 200:
                                 print(f"✈️ [Telegram]: Photo + Link sent for {page_title}")
-
+                            
                         if os.path.exists(temp_img_path):
                             try:
                                 os.remove(temp_img_path)
@@ -236,7 +171,7 @@ async def send_to_telegram(session, page_title, text, post_url, image_url=None, 
 async def extract_text_from_image_url(session, image_url):
     if not image_url:
         return ""
-
+        
     full_url = urljoin("https://www.facebook.com", image_url)
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     temp_img_path = os.path.join(DOWNLOAD_DIR, f"temp_ocr_{hashlib.md5(image_url.encode()).hexdigest()[:8]}.jpg")
@@ -250,9 +185,9 @@ async def extract_text_from_image_url(session, image_url):
                     await f.write(img_bytes)
 
                 results = await asyncio.to_thread(
-                    ocr_reader.readtext,
-                    temp_img_path,
-                    detail=0,
+                    ocr_reader.readtext, 
+                    temp_img_path, 
+                    detail=0, 
                     paragraph=True
                 )
 
@@ -287,15 +222,18 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
                              e.querySelector('div[aria-label*="أنشئ منشوراً"]') !== null;
             if (isInsideUl || isComposer) return false;
 
-            // 🚫 2. استبعاد قسم "العناصر المميزة" (Featured / Highlights)
+            // 🚫 2. استبعاد قسم "العناصر المميزة" وقسم "منشورات أخرى"
             let innerText = e.innerText || '';
-            if (innerText.includes('العناصر المميزة') || innerText.includes('Featured')) return false;
+            if (innerText.includes('العناصر المميزة') || innerText.includes('Featured') || 
+                innerText.includes('منشورات أخرى') || innerText.includes('More posts')) return false;
 
-            let isInsideFeatured = e.closest('div[aria-label*="العناصر المميزة"]') !== null ||
-                                   e.closest('div[aria-label*="Featured"]') !== null ||
-                                   (e.closest('div[role="region"]') !== null && e.closest('div[role="region"]').innerText.includes('العناصر المميزة'));
+            let isInsideIgnored = e.closest('div[aria-label*="العناصر المميزة"]') !== null ||
+                                  e.closest('div[aria-label*="Featured"]') !== null ||
+                                  e.closest('div[aria-label*="منشورات أخرى"]') !== null ||
+                                  e.closest('div[aria-label*="More posts"]') !== null ||
+                                  (e.closest('div[role="region"]') !== null && e.closest('div[role="region"]').innerText.includes('العناصر المميزة'));
             
-            return !isInsideFeatured;
+            return !isInsideIgnored;
         }
     """)
     if not is_valid:
@@ -312,6 +250,7 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
         }
     """)
 
+    # استخراج النص مع استبعاد الهيدر (اسم الصفحة وتوقيت النشر)
     clean_post_text = await post_element.evaluate("""
         container => {
             const isHeaderOrComment = (el) => {
@@ -336,8 +275,9 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
             let fullText = chunks.join('\\n');
             const uiPhrases = [
                 'عرض المزيد', 'See more', 'عرض أقل', 'See less', 'أعجبني', 'تعليق', 'مشاركة', 
-                'Like', 'Comment', 'Share', 'منشورات جديدة', 'منشور مثبت', 'Pinned post', 'عرض المزيد من التعليقات',
-                'العناصر المميزة', 'Featured'
+                'Like', 'Comment', 'Share', 'منشورات جديدة', 'منشور مثبت', 'Pinned post', 
+                'عرض المزيد من التعليقات', 'العناصر المميزة', 'Featured',
+                'منشورات أخرى', 'More posts', 'More Posts'
             ];
             
             return fullText
@@ -377,10 +317,12 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
         e => e.querySelector('video') !== null || e.querySelector('a[href*="/videos/"], a[href*="/reel/"]') !== null
     """)
 
+    # تنظيف وتصفية النص المجلوب
     lines = [line.strip() for line in clean_post_text.split('\n') if line.strip()]
     lines = [l for l in lines if not re.match(r'^(المرصد السوري|الحدث السوري|\d+\s*د|\d+\s*س|\.)$', l)]
     real_post_text = "\n".join(lines).strip()
 
+    # 🎯 الشرط الذكي المحدث:
     if len(real_post_text) >= 20:
         clean_post_text = real_post_text
     elif image_url:
@@ -418,7 +360,7 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
     async with semaphore:
         target_type = detect_target_type(target_url)
         first_run = await is_db_empty_for_target(target_url)
-
+        
         page = await context.new_page()
         try:
             print(f"🔄 [Start Check]: {target_url}")
@@ -456,13 +398,13 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
                     return '';
                 }
             """)
-
+            
             if not page_title or page_title in ['الإشعارات', 'تسجيل الدخول']:
                 parsed_path = urlparse(target_url).path.strip('/')
                 page_title = parsed_path if parsed_path else target_type
 
             element_selector = 'div[role="feed"] > div, div[role="article"], div[data-pagelet*="FeedUnit"]'
-
+            
             if first_run:
                 raw_elements = await page.query_selector_all(element_selector)
                 saved_initial = 0
@@ -483,25 +425,25 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
             # 🎯 الدورات التالية: استمرار السكرول حتى تصادف السكربت بوست قديم
             seen_in_run = set()
             hit_old_post = False
-            
-            for scroll_pass in range(10): 
+
+            for scroll_pass in range(10):
                 raw_elements = await page.query_selector_all(element_selector)
 
                 for post_elem in raw_elements:
                     post_id, text, post_url, img_url, has_video = await parse_single_post(post_elem, target_type, target_url, http_session)
-                    
                     if not post_id or post_id in seen_in_run:
                         continue
-
+                    
                     seen_in_run.add(post_id)
 
-                    # 🛑 إذا وصل المنشور لمنشور مسجل سابقاً يتوقف السكربت عن السكرول
+                    # 🛑 توقف السكرول إذا واجه منشوراً تمت معالجته سابقاً في قاعدة البيانات
                     if await is_post_exists(post_id) or await is_content_duplicate(text):
                         print(f"🛑 Encountered an already processed post in [{page_title}]. Stopping scroll.")
                         hit_old_post = True
                         break
 
                     print(f"🚨 New Post Found in [{page_title}]!")
+
                     await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
                     await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
 
@@ -519,44 +461,38 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
 
 # ==================== 🚀 MAIN ASYNC LOOP ====================
 async def main():
-    await init_db()
+    init_db()
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 
     print("🚀 Facebook Parallel Engine Started...")
+    print(f"🤖 Bot Connected: @RayImage_bot")
     print(f"🎯 Total Targets: {len(TARGET_URLS)} | Concurrency Limit: {MAX_CONCURRENT_TASKS}")
 
-    try:
-        async with async_playwright() as p:
-            context = await p.chromium.launch_persistent_context(
-                user_data_dir=USER_DATA_DIR,
-                headless=True,
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                viewport={"width": 1366, "height": 768},
-                locale="ar-SY"
-            )
+    async with async_playwright() as p:
+        context = await p.chromium.launch_persistent_context(
+            user_data_dir=USER_DATA_DIR,
+            headless=True,
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            viewport={"width": 1366, "height": 768},
+            locale="ar-SY"
+        )
+        
+        async with aiohttp.ClientSession() as http_session:
+            while True:
+                start_time = datetime.now()
+                print(f"\n⚡ [Cycle Start]: Monitoring pages in parallel...")
 
-            async with aiohttp.ClientSession() as http_session:
-                while True:
-                    start_time = datetime.now()
-                    print(f"\n⚡ [Cycle Start]: Monitoring pages in parallel...")
+                tasks = [
+                    monitor_target_worker(context, url, semaphore, http_session)
+                    for url in TARGET_URLS
+                ]
+                await asyncio.gather(*tasks)
 
-                    tasks = [
-                        monitor_target_worker(context, url, semaphore, http_session)
-                        for url in TARGET_URLS
-                    ]
-                    await asyncio.gather(*tasks)
-
-                    elapsed = (datetime.now() - start_time).seconds
-                    print(f"🏁 Cycle finished in {elapsed}s.")
-
-                    if RUN_ONCE:
-                        print("🏁 RUN_ONCE=true → إنهاء التنفيذ بعد دورة واحدة (الجدولة تُدار خارجيًا).")
-                        break
-
-                    print(f"💤 Waiting {CHECK_INTERVAL_SECONDS}s before next cycle...\n")
-                    await asyncio.sleep(CHECK_INTERVAL_SECONDS)
-    finally:
-        await close_db()
+                elapsed = (datetime.now() - start_time).seconds
+                print(f"🏁 Cycle finished in {elapsed}s.")
+                
+                print(f"💤 Waiting {CHECK_INTERVAL_SECONDS}s before next cycle...\n")
+                await asyncio.sleep(CHECK_INTERVAL_SECONDS)
 
 if __name__ == "__main__":
     asyncio.run(main())
