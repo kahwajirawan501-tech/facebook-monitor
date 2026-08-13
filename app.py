@@ -14,11 +14,6 @@ Facebook Lightweight Monitor
 طريقة التشغيل: يُستدعى GET /check دوريًا من مجدول خارجي مجاني
 (cron-job.org أو GitHub Actions) كل 3-5 دقائق. هذا الاستدعاء نفسه
 يوقظ الخدمة من وضع السكون على Render المجاني.
-
-⚠️ ملاحظة مهمة: بنية صفحات mbasic.facebook.com (أسماء العناصر/الروابط)
-قد تتغير من طرف فيسبوك بدون إشعار مسبق. إذا توقف استخراج المنشورات
-عن العمل، الدالة extract_posts() هي أول مكان يجب فحصه وتحديثه بعد
-معاينة الـ HTML الفعلي الذي يعيده الطلب.
 """
 
 import os
@@ -36,8 +31,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("fb-monitor")
 
 # ==================== ⚙️ الإعدادات ====================
-# لا أسرار مكتوبة داخل الكود إطلاقًا - كل شيء حساس يأتي من متغيرات البيئة
-# (يُضبط من لوحة Render: Environment > Add Environment Variable)
 
 TARGET_URLS = [
     "https://mbasic.facebook.com/syriahr",
@@ -49,8 +42,7 @@ def _require_env(name):
     value = os.environ.get(name)
     if not value:
         raise RuntimeError(
-            f"متغير البيئة {name} غير مضبوط. اضبطه من لوحة Render قبل التشغيل — "
-            "لا تكتب القيم الحساسة مباشرة داخل الكود."
+            f"متغير البيئة {name} غير مضبوط. اضبطه من لوحة Render قبل التشغيل."
         )
     return value
 
@@ -58,10 +50,9 @@ def _require_env(name):
 TELEGRAM_BOT_TOKEN = _require_env("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = _require_env("TELEGRAM_CHAT_ID")
 
-TURSO_DATABASE_URL = _require_env("TURSO_DATABASE_URL")  # مثال: libsql://your-db-name.turso.io
+TURSO_DATABASE_URL = _require_env("TURSO_DATABASE_URL")
 TURSO_AUTH_TOKEN = _require_env("TURSO_AUTH_TOKEN")
 
-# مفتاح بسيط لحماية /check من أي زائر عشوائي يستدعيه من المتصفح
 CHECK_SECRET = os.environ.get("CHECK_SECRET", "")
 
 REQUEST_HEADERS = {
@@ -71,7 +62,7 @@ REQUEST_HEADERS = {
     ),
 }
 
-MAX_NEW_POSTS_PER_TARGET = 5  # حماية من إغراق تيليجرام لو تغيرت بنية الصفحة فجأة
+MAX_NEW_POSTS_PER_TARGET = 5
 
 app = Flask(__name__)
 
@@ -140,11 +131,6 @@ def extract_page_title(soup, fallback):
 
 
 def extract_posts(html):
-    """
-    يستخرج قائمة منشورات (id, text, post_url) من HTML صفحة mbasic.
-    الاستراتيجية: نبحث عن روابط تشبه روابط منشورات (story_fbid / posts / permalink)
-    ثم نصعد لأقرب حاوية أب ونجمع نصها كنص المنشور.
-    """
     soup = BeautifulSoup(html, "html.parser")
     posts = []
     seen_links = set()
@@ -194,8 +180,10 @@ def fetch_target(target_url):
 # ==================== 🔄 دورة فحص واحدة (تُستدعى من /check) ====================
 def run_check_cycle():
     summary = []
+    client = None
 
-    with get_db_client() as client:
+    try:
+        client = get_db_client()
         init_db(client)
 
         for target_url in TARGET_URLS:
@@ -222,6 +210,13 @@ def run_check_cycle():
 
             log.info(f"✅ {page_title}: {new_count} منشور جديد من أصل {len(posts)} مكتشف")
             summary.append({"target": target_url, "new_posts": new_count, "found": len(posts)})
+
+    except Exception as db_err:
+        log.error(f"❌ خطأ في التعامل مع قاعدة البيانات Turso: {db_err}")
+        raise db_err
+    finally:
+        if client and hasattr(client, "close"):
+            client.close()
 
     return summary
 
