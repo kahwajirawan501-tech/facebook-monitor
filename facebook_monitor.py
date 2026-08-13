@@ -38,8 +38,7 @@ TURSO_AUTH_TOKEN = _get_env("TURSO_AUTH_TOKEN")
 MAX_CONCURRENT_TASKS = int(_get_env("MAX_CONCURRENT_TASKS", required=False, default="3"))
 CHECK_INTERVAL_SECONDS = int(_get_env("CHECK_INTERVAL_SECONDS", required=False, default="120"))
 
-# RUN_ONCE=true → دورة فحص واحدة ثم خروج (مناسب لـ GitHub Actions / Render Cron Job
-# حيث الجدولة تُدار خارجيًا). RUN_ONCE=false (الافتراضي) → حلقة دائمة (مناسب لـ systemd على VM).
+# RUN_ONCE=true → دورة فحص واحدة ثم خروج (مناسب لـ GitHub Actions / Render Cron Job)
 RUN_ONCE = _get_env("RUN_ONCE", required=False, default="false").lower() in ("1", "true", "yes")
 
 USER_DATA_DIR = os.path.abspath(_get_env("USER_DATA_DIR", required=False, default="user_data"))
@@ -52,9 +51,6 @@ print("⏳ Initializing EasyOCR Engine for Arabic & English text extraction...")
 ocr_reader = easyocr.Reader(['ar', 'en'], gpu=False)
 
 # ==================== 🗄️ TURSO DATABASE LAYER (raw HTTP, no libsql-client) ====================
-# نستدعي واجهة Turso HTTP (Hrana v2 pipeline) مباشرة عبر aiohttp بدل مكتبة libsql-client،
-# لأن تلك المكتبة أظهرت أخطاء توافق بروتوكول (WebSocket handshake / KeyError 'result')
-# داخل بيئة GitHub Actions. هذا النهج أبسط وأكثر ثباتًا لأننا نتحكم بالتحليل بأنفسنا.
 db_session: aiohttp.ClientSession | None = None
 TURSO_PIPELINE_URL: str | None = None
 
@@ -128,8 +124,6 @@ async def init_db():
     await _ensure_posts_columns()
     print("🗄️ Connected to Turso and ensured `posts` table exists.")
 
-# أعمدة الجدول المطلوبة لعمل الكود الحالي. إن كان الجدول قد أُنشئ مسبقًا بمخطط أقدم/ناقص
-# (كما حدث هنا)، هذا يضيف أي عمود مفقود تلقائيًا بدل فشل كل استعلام لاحق.
 _REQUIRED_POSTS_COLUMNS = {
     "text": "TEXT",
     "post_url": "TEXT",
@@ -142,7 +136,7 @@ _REQUIRED_POSTS_COLUMNS = {
 
 async def _ensure_posts_columns():
     rows = await _turso_execute("PRAGMA table_info(posts)")
-    existing_cols = {r[1] for r in rows}  # r = (cid, name, type, notnull, dflt_value, pk)
+    existing_cols = {r[1] for r in rows}
     for col, col_type in _REQUIRED_POSTS_COLUMNS.items():
         if col not in existing_cols:
             await _turso_execute(f"ALTER TABLE posts ADD COLUMN {col} {col_type}")
@@ -284,13 +278,24 @@ async def extract_text_from_image_url(session, image_url):
 async def parse_single_post(post_element, target_type, target_url, http_session):
     is_valid = await post_element.evaluate("""
         e => {
+            // 1. استبعاد التعليقات والردود وصندوق إنشاء منشور
             let aria = (e.getAttribute('aria-label') || '').toLowerCase();
             if (aria.includes('comment by') || aria.includes('reply by') || aria.includes('تعليق') || aria.includes('رد')) return false;
             let isInsideUl = e.closest('ul') !== null;
             let isComposer = e.querySelector('div[aria-label*="Write something"]') !== null || 
                              e.querySelector('div[aria-label*="بماذا تفكر"]') !== null ||
                              e.querySelector('div[aria-label*="أنشئ منشوراً"]') !== null;
-            return !isInsideUl && !isComposer;
+            if (isInsideUl || isComposer) return false;
+
+            // 🚫 2. استبعاد قسم "العناصر المميزة" (Featured / Highlights)
+            let innerText = e.innerText || '';
+            if (innerText.includes('العناصر المميزة') || innerText.includes('Featured')) return false;
+
+            let isInsideFeatured = e.closest('div[aria-label*="العناصر المميزة"]') !== null ||
+                                   e.closest('div[aria-label*="Featured"]') !== null ||
+                                   (e.closest('div[role="region"]') !== null && e.closest('div[role="region"]').innerText.includes('العناصر المميزة'));
+            
+            return !isInsideFeatured;
         }
     """)
     if not is_valid:
@@ -307,7 +312,6 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
         }
     """)
 
-    # استخراج النص مع استبعاد الهيدر (اسم الصفحة وتوقيت النشر)
     clean_post_text = await post_element.evaluate("""
         container => {
             const isHeaderOrComment = (el) => {
@@ -332,7 +336,8 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
             let fullText = chunks.join('\\n');
             const uiPhrases = [
                 'عرض المزيد', 'See more', 'عرض أقل', 'See less', 'أعجبني', 'تعليق', 'مشاركة', 
-                'Like', 'Comment', 'Share', 'منشورات جديدة', 'منشور مثبت', 'Pinned post', 'عرض المزيد من التعليقات'
+                'Like', 'Comment', 'Share', 'منشورات جديدة', 'منشور مثبت', 'Pinned post', 'عرض المزيد من التعليقات',
+                'العناصر المميزة', 'Featured'
             ];
             
             return fullText
@@ -372,14 +377,10 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
         e => e.querySelector('video') !== null || e.querySelector('a[href*="/videos/"], a[href*="/reel/"]') !== null
     """)
 
-    # تنظيف وتصفية النص المجلوب
     lines = [line.strip() for line in clean_post_text.split('\n') if line.strip()]
     lines = [l for l in lines if not re.match(r'^(المرصد السوري|الحدث السوري|\d+\s*د|\d+\s*س|\.)$', l)]
     real_post_text = "\n".join(lines).strip()
 
-    # 🎯 الشرط الذكي المحدث:
-    # إذا كان هناك نص منشور حقيقي (أكثر من 20 حرف)، نكتفي به ولا نقرأ الصورة.
-    # أما إذا كان المنشور بدون نص أصلي (أو مجرد توقيت واسم صفحة)، نقرأ الصورة عبر الـ OCR فوراً.
     if len(real_post_text) >= 20:
         clean_post_text = real_post_text
     elif image_url:
@@ -479,37 +480,37 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
                 print(f"✅ Baseline established ({saved_initial} posts) for: {page_title}")
                 return
 
+            # 🎯 الدورات التالية: استمرار السكرول حتى تصادف السكربت بوست قديم
             seen_in_run = set()
-            for _ in range(5):
+            hit_old_post = False
+            
+            for scroll_pass in range(10): 
                 raw_elements = await page.query_selector_all(element_selector)
-                found_new_this_pass = False
 
                 for post_elem in raw_elements:
                     post_id, text, post_url, img_url, has_video = await parse_single_post(post_elem, target_type, target_url, http_session)
+                    
                     if not post_id or post_id in seen_in_run:
                         continue
 
                     seen_in_run.add(post_id)
 
+                    # 🛑 إذا وصل المنشور لمنشور مسجل سابقاً يتوقف السكربت عن السكرول
                     if await is_post_exists(post_id) or await is_content_duplicate(text):
-                        # منشور معروف مسبقًا — لا نتوقف هنا، فقط نتجاهله ونتابع فحص بقية
-                        # المنشورات الظاهرة (قد يكون هذا منشورًا مثبّتًا/معاد ترتيبه من فيسبوك
-                        # وليس بالضرورة يعني أن كل ما تحته قديم أيضًا).
-                        continue
+                        print(f"🛑 Encountered an already processed post in [{page_title}]. Stopping scroll.")
+                        hit_old_post = True
+                        break
 
                     print(f"🚨 New Post Found in [{page_title}]!")
-                    found_new_this_pass = True
-
                     await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
                     await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
 
-                if not found_new_this_pass:
-                    # لم نجد أي شيء جديد في هذا التمرير الكامل للصفحة الظاهرة حاليًا —
-                    # لا داعي للتمرير لأسفل أكثر في هذه الدورة.
+                if hit_old_post:
                     break
 
+                print(f"📜 Scrolling down to check for more new posts... (Pass {scroll_pass + 1})")
                 await page.keyboard.press("PageDown")
-                await page.wait_for_timeout(2000)
+                await page.wait_for_timeout(2500)
 
         except Exception as e:
             print(f"❌ Error while monitoring {target_url}: {e}")
