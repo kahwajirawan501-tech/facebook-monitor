@@ -9,7 +9,6 @@ from urllib.parse import urlparse, urljoin
 
 import aiohttp
 import aiofiles
-import libsql_client
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright
 import easyocr
@@ -52,27 +51,69 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 print("⏳ Initializing EasyOCR Engine for Arabic & English text extraction...")
 ocr_reader = easyocr.Reader(['ar', 'en'], gpu=False)
 
-# ==================== 🗄️ TURSO (libSQL) DATABASE LAYER ====================
-db_client: libsql_client.Client | None = None
+# ==================== 🗄️ TURSO DATABASE LAYER (raw HTTP, no libsql-client) ====================
+# نستدعي واجهة Turso HTTP (Hrana v2 pipeline) مباشرة عبر aiohttp بدل مكتبة libsql-client،
+# لأن تلك المكتبة أظهرت أخطاء توافق بروتوكول (WebSocket handshake / KeyError 'result')
+# داخل بيئة GitHub Actions. هذا النهج أبسط وأكثر ثباتًا لأننا نتحكم بالتحليل بأنفسنا.
+db_session: aiohttp.ClientSession | None = None
+TURSO_PIPELINE_URL: str | None = None
 
 def _to_http_url(url: str) -> str:
-    # مكتبة libsql-client تختار البروتوكول حسب بادئة الرابط:
-    # libsql:// أو ws:// → WebSocket (قد تفشل مصافحة الاتصال داخل GitHub Actions runners).
-    # https:// أو http:// → HTTP عادي (طلب واحد لكل استعلام، أكثر توافقًا مع بيئات CI).
-    # نحوّل تلقائيًا حتى لو كان السر محفوظًا بصيغة libsql:// كما تُظهره واجهة Turso.
     if url.startswith("libsql://"):
         return "https://" + url[len("libsql://"):]
     if url.startswith("ws://"):
         return "http://" + url[len("ws://"):]
     return url
 
+def _hrana_value(v):
+    if v is None:
+        return {"type": "null"}
+    if isinstance(v, bool):
+        return {"type": "integer", "value": "1" if v else "0"}
+    if isinstance(v, int):
+        return {"type": "integer", "value": str(v)}
+    if isinstance(v, float):
+        return {"type": "float", "value": v}
+    return {"type": "text", "value": str(v)}
+
+def _unwrap_row(row):
+    out = []
+    for cell in row:
+        t = cell.get("type")
+        if t == "null":
+            out.append(None)
+        elif t == "integer":
+            out.append(int(cell["value"]))
+        elif t == "float":
+            out.append(float(cell["value"]))
+        else:
+            out.append(cell.get("value"))
+    return out
+
+async def _turso_execute(sql, args=None):
+    payload = {
+        "requests": [
+            {"type": "execute", "stmt": {"sql": sql, "args": [_hrana_value(a) for a in (args or [])]}},
+            {"type": "close"},
+        ]
+    }
+    headers = {"Authorization": f"Bearer {TURSO_AUTH_TOKEN}"}
+    async with db_session.post(TURSO_PIPELINE_URL, json=payload, headers=headers, timeout=20) as resp:
+        data = await resp.json()
+        if resp.status != 200:
+            raise RuntimeError(f"Turso HTTP {resp.status}: {data}")
+        first = data["results"][0]
+        if first.get("type") != "ok":
+            raise RuntimeError(f"Turso query error: {first}")
+        result = first["response"]["result"]
+        return [_unwrap_row(r) for r in result.get("rows", [])]
+
 async def init_db():
-    global db_client
-    db_client = libsql_client.create_client(
-        url=_to_http_url(TURSO_DATABASE_URL),
-        auth_token=TURSO_AUTH_TOKEN,
-    )
-    await db_client.execute('''
+    global db_session, TURSO_PIPELINE_URL
+    base = _to_http_url(TURSO_DATABASE_URL).rstrip("/")
+    TURSO_PIPELINE_URL = f"{base}/v2/pipeline"
+    db_session = aiohttp.ClientSession()
+    await _turso_execute('''
         CREATE TABLE IF NOT EXISTS posts (
             id TEXT PRIMARY KEY,
             text TEXT,
@@ -86,24 +127,28 @@ async def init_db():
     ''')
     print("🗄️ Connected to Turso and ensured `posts` table exists.")
 
+async def close_db():
+    if db_session:
+        await db_session.close()
+
 async def is_db_empty_for_target(target_url):
-    rs = await db_client.execute('SELECT COUNT(*) FROM posts WHERE target_url = ?', [target_url])
-    return rs.rows[0][0] == 0
+    rows = await _turso_execute('SELECT COUNT(*) FROM posts WHERE target_url = ?', [target_url])
+    return rows[0][0] == 0
 
 async def is_post_exists(post_id):
-    rs = await db_client.execute('SELECT 1 FROM posts WHERE id = ?', [post_id])
-    return len(rs.rows) > 0
+    rows = await _turso_execute('SELECT 1 FROM posts WHERE id = ?', [post_id])
+    return len(rows) > 0
 
 async def is_content_duplicate(clean_text):
     if not clean_text or len(clean_text) < 10:
         return False
-    rs = await db_client.execute(
+    rows = await _turso_execute(
         'SELECT 1 FROM posts WHERE text = ? ORDER BY created_at DESC LIMIT 30', [clean_text]
     )
-    return len(rs.rows) > 0
+    return len(rows) > 0
 
 async def save_post_to_db(post_id, text, post_url, image_url, video_url, target_type, target_url):
-    await db_client.execute(
+    await _turso_execute(
         '''INSERT INTO posts (id, text, post_url, image_url, video_url, target_type, target_url, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
         [post_id, text, post_url, image_url, video_url, target_type, target_url,
@@ -484,8 +529,7 @@ async def main():
                     print(f"💤 Waiting {CHECK_INTERVAL_SECONDS}s before next cycle...\n")
                     await asyncio.sleep(CHECK_INTERVAL_SECONDS)
     finally:
-        if db_client:
-            await db_client.close()
+        await close_db()
 
 if __name__ == "__main__":
     asyncio.run(main())
