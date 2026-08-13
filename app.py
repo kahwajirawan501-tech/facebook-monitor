@@ -70,10 +70,11 @@ FB_COOKIE = os.environ.get("FB_COOKIE", "")
 
 REQUEST_HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/90.0.4430.91 Mobile Safari/537.36"
+        "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
     ),
     "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 if FB_COOKIE:
     REQUEST_HEADERS["Cookie"] = FB_COOKIE
@@ -199,6 +200,12 @@ def fetch_target(target_url):
         raise RuntimeError(
             "فيسبوك أعاد التوجيه لصفحة تسجيل الدخول - غالبًا FB_COOKIE غير مضبوط "
             "أو انتهت صلاحية الجلسة ويجب استخراج كوكيز جديدة."
+        )
+
+    if "unsupported-interstitial" in resp.text or "<title>خطأ</title>" in resp.text[:2000]:
+        raise RuntimeError(
+            "فيسبوك أرجع صفحة \"المتصفح غير مدعوم\" بدل المحتوى - "
+            "غالبًا بسبب User-Agent قديم يجب تحديثه."
         )
 
     resp.raise_for_status()
