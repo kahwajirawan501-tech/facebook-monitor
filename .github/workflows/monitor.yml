@@ -1,0 +1,43 @@
+name: Facebook Early-Alert Monitor
+
+on:
+  schedule:
+    # كل 5 دقائق — عدّلها حسب حاجتك (لاحظ أن GitHub قد تؤخر التشغيل بضع دقائق وقت الازدحام)
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}   # يسمح بتشغيل يدوي من تبويب Actions للاختبار
+
+# يمنع تراكم تشغيلات متوازية إذا تأخرت إحداها
+concurrency:
+  group: facebook-monitor
+  cancel-in-progress: false
+
+jobs:
+  run-monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8   # أقل من الفاصل الزمني للجدولة حتى لا تتراكم التشغيلات
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright Chromium
+        run: playwright install --with-deps chromium
+
+      - name: Run one monitoring cycle
+        env:
+          RUN_ONCE: "true"
+          TARGET_URLS: ${{ secrets.TARGET_URLS }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+        run: python facebook_monitor.py
