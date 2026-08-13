@@ -55,10 +55,21 @@ ocr_reader = easyocr.Reader(['ar', 'en'], gpu=False)
 # ==================== 🗄️ TURSO (libSQL) DATABASE LAYER ====================
 db_client: libsql_client.Client | None = None
 
+def _to_http_url(url: str) -> str:
+    # مكتبة libsql-client تختار البروتوكول حسب بادئة الرابط:
+    # libsql:// أو ws:// → WebSocket (قد تفشل مصافحة الاتصال داخل GitHub Actions runners).
+    # https:// أو http:// → HTTP عادي (طلب واحد لكل استعلام، أكثر توافقًا مع بيئات CI).
+    # نحوّل تلقائيًا حتى لو كان السر محفوظًا بصيغة libsql:// كما تُظهره واجهة Turso.
+    if url.startswith("libsql://"):
+        return "https://" + url[len("libsql://"):]
+    if url.startswith("ws://"):
+        return "http://" + url[len("ws://"):]
+    return url
+
 async def init_db():
     global db_client
     db_client = libsql_client.create_client(
-        url=TURSO_DATABASE_URL,
+        url=_to_http_url(TURSO_DATABASE_URL),
         auth_token=TURSO_AUTH_TOKEN,
     )
     await db_client.execute('''
