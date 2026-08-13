@@ -254,6 +254,33 @@ def check():
     return jsonify({"status": "done", "results": result})
 
 
+@app.route("/debug")
+def debug():
+    """
+    نقطة تشخيصية مؤقتة: تجلب صفحة هدف واحد وتُرجع عيّنة من HTML وكل روابط <a>
+    الموجودة فيها، لمساعدتنا على معرفة بنية mbasic الحالية الفعلية وتصحيح
+    extract_posts() على أساسها. احذفها بعد انتهاء التشخيص.
+    """
+    if CHECK_SECRET and request.args.get("key", "") != CHECK_SECRET:
+        return jsonify({"error": "unauthorized"}), 401
+
+    target = request.args.get("target", TARGET_URLS[0])
+    try:
+        html = fetch_target(target)
+    except Exception as e:
+        return jsonify({"error": str(e), "target": target}), 200
+
+    soup = BeautifulSoup(html, "html.parser")
+    hrefs = [a["href"] for a in soup.find_all("a", href=True)]
+
+    return jsonify({
+        "target": target,
+        "html_length": len(html),
+        "sample_html": html[:4000],
+        "all_hrefs": hrefs[:80],
+    })
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
