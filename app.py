@@ -14,6 +14,11 @@ Facebook Lightweight Monitor
 طريقة التشغيل: يُستدعى GET /check دوريًا من مجدول خارجي مجاني
 (cron-job.org أو GitHub Actions) كل 3-5 دقائق. هذا الاستدعاء نفسه
 يوقظ الخدمة من وضع السكون على Render المجاني.
+
+⚠️ ملاحظة مهمة: بنية صفحات mbasic.facebook.com (أسماء العناصر/الروابط)
+قد تتغير من طرف فيسبوك بدون إشعار مسبق. إذا توقف استخراج المنشورات
+عن العمل، الدالة extract_posts() هي أول مكان يجب فحصه وتحديثه بعد
+معاينة الـ HTML الفعلي الذي يعيده الطلب.
 """
 
 import os
@@ -31,6 +36,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("fb-monitor")
 
 # ==================== ⚙️ الإعدادات ====================
+# لا أسرار مكتوبة داخل الكود إطلاقًا - كل شيء حساس يأتي من متغيرات البيئة
+# (يُضبط من لوحة Render: Environment > Add Environment Variable)
 
 TARGET_URLS = [
     "https://mbasic.facebook.com/syriahr",
@@ -42,7 +49,8 @@ def _require_env(name):
     value = os.environ.get(name)
     if not value:
         raise RuntimeError(
-            f"متغير البيئة {name} غير مضبوط. اضبطه من لوحة Render قبل التشغيل."
+            f"متغير البيئة {name} غير مضبوط. اضبطه من لوحة Render قبل التشغيل — "
+            "لا تكتب القيم الحساسة مباشرة داخل الكود."
         )
     return value
 
@@ -50,19 +58,27 @@ def _require_env(name):
 TELEGRAM_BOT_TOKEN = _require_env("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = _require_env("TELEGRAM_CHAT_ID")
 
-TURSO_DATABASE_URL = _require_env("TURSO_DATABASE_URL")
+TURSO_DATABASE_URL = _require_env("TURSO_DATABASE_URL")  # مثال: libsql://your-db-name.turso.io
 TURSO_AUTH_TOKEN = _require_env("TURSO_AUTH_TOKEN")
 
+# مفتاح بسيط لحماية /check من أي زائر عشوائي يستدعيه من المتصفح
 CHECK_SECRET = os.environ.get("CHECK_SECRET", "")
+
+# كوكيز جلسة فيسبوك (اختياري لكن غالبًا ضروري) - انسخها من متصفح مسجّل دخوله
+# انظر تعليمات الحصول عليها في README. بدونها mbasic يعيد التوجيه لصفحة تسجيل الدخول.
+FB_COOKIE = os.environ.get("FB_COOKIE", "")
 
 REQUEST_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/90.0.4430.91 Mobile Safari/537.36"
     ),
+    "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
 }
+if FB_COOKIE:
+    REQUEST_HEADERS["Cookie"] = FB_COOKIE
 
-MAX_NEW_POSTS_PER_TARGET = 5
+MAX_NEW_POSTS_PER_TARGET = 5  # حماية من إغراق تيليجرام لو تغيرت بنية الصفحة فجأة
 
 app = Flask(__name__)
 
@@ -131,6 +147,11 @@ def extract_page_title(soup, fallback):
 
 
 def extract_posts(html):
+    """
+    يستخرج قائمة منشورات (id, text, post_url) من HTML صفحة mbasic.
+    الاستراتيجية: نبحث عن روابط تشبه روابط منشورات (story_fbid / posts / permalink)
+    ثم نصعد لأقرب حاوية أب ونجمع نصها كنص المنشور.
+    """
     soup = BeautifulSoup(html, "html.parser")
     posts = []
     seen_links = set()
@@ -173,6 +194,13 @@ def extract_posts(html):
 
 def fetch_target(target_url):
     resp = requests.get(target_url, headers=REQUEST_HEADERS, timeout=20)
+
+    if "login.php" in resp.url or "checkpoint" in resp.url:
+        raise RuntimeError(
+            "فيسبوك أعاد التوجيه لصفحة تسجيل الدخول - غالبًا FB_COOKIE غير مضبوط "
+            "أو انتهت صلاحية الجلسة ويجب استخراج كوكيز جديدة."
+        )
+
     resp.raise_for_status()
     return resp.text
 
@@ -180,10 +208,8 @@ def fetch_target(target_url):
 # ==================== 🔄 دورة فحص واحدة (تُستدعى من /check) ====================
 def run_check_cycle():
     summary = []
-    client = None
 
-    try:
-        client = get_db_client()
+    with get_db_client() as client:
         init_db(client)
 
         for target_url in TARGET_URLS:
@@ -210,13 +236,6 @@ def run_check_cycle():
 
             log.info(f"✅ {page_title}: {new_count} منشور جديد من أصل {len(posts)} مكتشف")
             summary.append({"target": target_url, "new_posts": new_count, "found": len(posts)})
-
-    except Exception as db_err:
-        log.error(f"❌ خطأ في التعامل مع قاعدة البيانات Turso: {db_err}")
-        raise db_err
-    finally:
-        if client and hasattr(client, "close"):
-            client.close()
 
     return summary
 
