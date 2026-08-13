@@ -482,7 +482,7 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
             seen_in_run = set()
             for _ in range(5):
                 raw_elements = await page.query_selector_all(element_selector)
-                found_stored = False
+                found_new_this_pass = False
 
                 for post_elem in raw_elements:
                     post_id, text, post_url, img_url, has_video = await parse_single_post(post_elem, target_type, target_url, http_session)
@@ -492,15 +492,20 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
                     seen_in_run.add(post_id)
 
                     if await is_post_exists(post_id) or await is_content_duplicate(text):
-                        found_stored = True
-                        break
+                        # منشور معروف مسبقًا — لا نتوقف هنا، فقط نتجاهله ونتابع فحص بقية
+                        # المنشورات الظاهرة (قد يكون هذا منشورًا مثبّتًا/معاد ترتيبه من فيسبوك
+                        # وليس بالضرورة يعني أن كل ما تحته قديم أيضًا).
+                        continue
 
                     print(f"🚨 New Post Found in [{page_title}]!")
+                    found_new_this_pass = True
 
                     await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
                     await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
 
-                if found_stored:
+                if not found_new_this_pass:
+                    # لم نجد أي شيء جديد في هذا التمرير الكامل للصفحة الظاهرة حاليًا —
+                    # لا داعي للتمرير لأسفل أكثر في هذه الدورة.
                     break
 
                 await page.keyboard.press("PageDown")
