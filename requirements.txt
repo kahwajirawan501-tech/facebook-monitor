@@ -4,4 +4,4 @@ playwright
 easyocr
 Pillow
 python-dotenv
-libsql-client
+ 
