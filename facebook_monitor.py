@@ -46,7 +46,7 @@ DOWNLOAD_DIR = _get_env("DOWNLOAD_DIR", required=False, default="downloads")
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# قفل لمنع التكرار والتزامن المتوازي بين الصفحات الشقيقة
+# قفل لمنع التزامن المتوازي بين الصفحات
 db_lock: asyncio.Lock | None = None
 
 # ==================== 👁️ OCR ENGINE ====================
@@ -157,22 +157,14 @@ async def is_post_exists(post_id):
     rows = await _turso_execute('SELECT 1 FROM posts WHERE id = ?', [post_id])
     return len(rows) > 0
 
+# فحص التكرار الدقيق بنفس المنطق الأصلي المستقر لمنع الخلط بين الأخبار
 async def is_content_duplicate(clean_text):
-    if not clean_text or len(clean_text) < 15:
+    if not clean_text or len(clean_text) < 10:
         return False
-    
-    # تنظيف النص لمقارنة متقدمة بين الصفحات الشقيقة
-    normalized = re.sub(r'[^\w\s]', '', clean_text).strip()
-    sample = normalized[:80] if len(normalized) >= 80 else normalized
-
-    rows = await _turso_execute('SELECT text FROM posts ORDER BY created_at DESC LIMIT 50')
-    for (stored_text,) in rows:
-        if not stored_text:
-            continue
-        stored_norm = re.sub(r'[^\w\s]', '', stored_text).strip()
-        if sample in stored_norm or stored_norm[:80] in normalized:
-            return True
-    return False
+    rows = await _turso_execute(
+        'SELECT 1 FROM posts WHERE text = ? ORDER BY created_at DESC LIMIT 30', [clean_text]
+    )
+    return len(rows) > 0
 
 async def save_post_to_db(post_id, text, post_url, image_url, video_url, target_type, target_url):
     await _turso_execute(
@@ -509,11 +501,10 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
                 print(f"✅ Baseline established ({saved_initial} posts) for: {page_title}")
                 return
 
-            # 🎯 الدورات التالية: استمرار السكرول لأسفل حتى العثور على منشور مسجل مسبقاً
+            # 🎯 الدورات التالية: التمرير وفحص كافة المنشورات دون توقف مفاجئ
             seen_in_run = set()
-            hit_old_post = False
 
-            for scroll_pass in range(10):
+            for scroll_pass in range(4):
                 raw_elements = await page.query_selector_all(element_selector)
 
                 for post_elem in raw_elements:
@@ -523,24 +514,19 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
 
                     seen_in_run.add(post_id)
 
-                    # 🔒 استخدام قفل التزامن لمنع إرسال نفس الخبر إذا تم رصده في صفحتين شقيقتين بنفس الثانية
+                    # 🔒 التحقق مع قفل التزامن البرمجي
                     async with db_lock:
                         if await is_post_exists(post_id) or await is_content_duplicate(text):
-                            print(f"🛑 Already processed in [{page_title}]. Stopping scroll.")
-                            hit_old_post = True
-                            break
+                            # إذا كان منشوراً قديماً: نتجاهله ونتابع فحص باقي المنشورات في الصفحة (لا نوقف السكرول)
+                            continue
 
-                        # ✨ منشور جديد: حفظ فوري ثم إرسال لتلغرام
+                        # ✨ منشور جديد لم يُرصد سابقاً
                         print(f"🚨 New Post Found in [{page_title}]!")
                         await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
                         await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
 
-                if hit_old_post:
-                    break
-
-                print(f"📜 Scrolling down to check for more new posts... (Pass {scroll_pass + 1})")
                 await page.keyboard.press("PageDown")
-                await page.wait_for_timeout(2500)
+                await page.wait_for_timeout(2000)
 
         except Exception as e:
             print(f"❌ Error while monitoring {target_url}: {e}")
