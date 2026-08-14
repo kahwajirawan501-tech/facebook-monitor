@@ -33,21 +33,14 @@ TARGET_URLS = [u.strip() for u in _get_env("TARGET_URLS").split(",") if u.strip(
 TELEGRAM_BOT_TOKEN = _get_env("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = _get_env("TELEGRAM_CHAT_ID")
 
-TURSO_DATABASE_URL = _get_env("TURSO_DATABASE_URL")   # مثال: libsql://your-db-name-org.turso.io
+TURSO_DATABASE_URL = _get_env("TURSO_DATABASE_URL")
 TURSO_AUTH_TOKEN = _get_env("TURSO_AUTH_TOKEN")
 
 MAX_CONCURRENT_TASKS = int(_get_env("MAX_CONCURRENT_TASKS", required=False, default="3"))
 CHECK_INTERVAL_SECONDS = int(_get_env("CHECK_INTERVAL_SECONDS", required=False, default="120"))
-
-# RUN_ONCE=true → دورة فحص واحدة ثم خروج (مناسب لـ GitHub Actions / Render Cron Job
-# حيث الجدولة تُدار خارجيًا). RUN_ONCE=false (الافتراضي) → حلقة دائمة (مناسب لـ systemd على VM).
 RUN_ONCE = _get_env("RUN_ONCE", required=False, default="false").lower() in ("1", "true", "yes")
 
 USER_DATA_DIR = os.path.abspath(_get_env("USER_DATA_DIR", required=False, default="user_data"))
-
-# جلسة فيسبوك مسجّلة الدخول (كوكيز + localStorage) — تُقرأ كنص JSON كامل من GitHub
-# Secrets مباشرة (وليس كمسار ملف)، لأن بيئة GitHub Actions لا تحتفظ بأي شيء بين
-# التشغيلات. إن كان السر غير موجود، يعمل السكربت كضيف غير مسجّل دخول كما كان سابقًا.
 FB_AUTH_STATE_JSON = _get_env("FB_AUTH_STATE_JSON", required=False, default=None)
 DOWNLOAD_DIR = _get_env("DOWNLOAD_DIR", required=False, default="downloads")
 
@@ -55,12 +48,9 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 # ==================== 👁️ OCR ENGINE ====================
 print("⏳ Initializing EasyOCR Engine for Arabic & English text extraction...")
-ocr_reader = easyocr.Reader(['ar', 'en'], gpu=False)
+ocr_reader = easyocr.Reader(['ar', 'en'], gpu=False, verbose=False)
 
-# ==================== 🗄️ TURSO DATABASE LAYER (raw HTTP, no libsql-client) ====================
-# نستدعي واجهة Turso HTTP (Hrana v2 pipeline) مباشرة عبر aiohttp بدل مكتبة libsql-client،
-# لأن تلك المكتبة أظهرت أخطاء توافق بروتوكول (WebSocket handshake / KeyError 'result')
-# داخل بيئة GitHub Actions. هذا النهج أبسط وأكثر ثباتًا لأننا نتحكم بالتحليل بأنفسنا.
+# ==================== 🗄️ TURSO DATABASE LAYER (raw HTTP) ====================
 db_session: aiohttp.ClientSession | None = None
 TURSO_PIPELINE_URL: str | None = None
 
@@ -134,8 +124,6 @@ async def init_db():
     await _ensure_posts_columns()
     print("🗄️ Connected to Turso and ensured `posts` table exists.")
 
-# أعمدة الجدول المطلوبة لعمل الكود الحالي. إن كان الجدول قد أُنشئ مسبقًا بمخطط أقدم/ناقص
-# (كما حدث هنا)، هذا يضيف أي عمود مفقود تلقائيًا بدل فشل كل استعلام لاحق.
 _REQUIRED_POSTS_COLUMNS = {
     "text": "TEXT",
     "post_url": "TEXT",
@@ -148,7 +136,7 @@ _REQUIRED_POSTS_COLUMNS = {
 
 async def _ensure_posts_columns():
     rows = await _turso_execute("PRAGMA table_info(posts)")
-    existing_cols = {r[1] for r in rows}  # r = (cid, name, type, notnull, dflt_value, pk)
+    existing_cols = {r[1] for r in rows}
     for col, col_type in _REQUIRED_POSTS_COLUMNS.items():
         if col not in existing_cols:
             await _turso_execute(f"ALTER TABLE posts ADD COLUMN {col} {col_type}")
@@ -296,7 +284,19 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
             let isComposer = e.querySelector('div[aria-label*="Write something"]') !== null || 
                              e.querySelector('div[aria-label*="بماذا تفكر"]') !== null ||
                              e.querySelector('div[aria-label*="أنشئ منشوراً"]') !== null;
-            return !isInsideUl && !isComposer;
+            if (isInsideUl || isComposer) return false;
+
+            let innerText = e.innerText || '';
+            if (innerText.includes('العناصر المميزة') || innerText.includes('Featured') || 
+                innerText.includes('منشورات أخرى') || innerText.includes('More posts')) return false;
+
+            let isInsideIgnored = e.closest('div[aria-label*="العناصر المميزة"]') !== null ||
+                                  e.closest('div[aria-label*="Featured"]') !== null ||
+                                  e.closest('div[aria-label*="منشورات أخرى"]') !== null ||
+                                  e.closest('div[aria-label*="More posts"]') !== null ||
+                                  (e.closest('div[role="region"]') !== null && e.closest('div[role="region"]').innerText.includes('العناصر المميزة'));
+            
+            return !isInsideIgnored;
         }
     """)
     if not is_valid:
@@ -313,7 +313,6 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
         }
     """)
 
-    # استخراج النص مع استبعاد الهيدر (اسم الصفحة وتوقيت النشر)
     clean_post_text = await post_element.evaluate("""
         container => {
             const isHeaderOrComment = (el) => {
@@ -338,7 +337,9 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
             let fullText = chunks.join('\\n');
             const uiPhrases = [
                 'عرض المزيد', 'See more', 'عرض أقل', 'See less', 'أعجبني', 'تعليق', 'مشاركة', 
-                'Like', 'Comment', 'Share', 'منشورات جديدة', 'منشور مثبت', 'Pinned post', 'عرض المزيد من التعليقات'
+                'Like', 'Comment', 'Share', 'منشورات جديدة', 'منشور مثبت', 'Pinned post', 
+                'عرض المزيد من التعليقات', 'العناصر المميزة', 'Featured',
+                'منشورات أخرى', 'More posts', 'More Posts'
             ];
             
             return fullText
@@ -355,7 +356,7 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
             let imgs = Array.from(e.querySelectorAll('img'));
             for (let img of imgs) {
                 let src = img.src || img.getAttribute('data-src') || '';
-                if ((src.includes('scontent') || src.includes('fbcdn')) && 
+                if ((src.includes('scontent') || src.includes('fbcdn') || src.includes('external')) && 
                     !src.includes('rsrc.php') && !src.includes('emoji.php') && 
                     !src.includes('p50x50') && !src.includes('p160x160')) {
                     return src;
@@ -369,7 +370,7 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
     post_url = target_url
     for link in all_links:
         href = await link.get_attribute('href') or ""
-        if any(keyword in href for keyword in ["/posts/", "/permalink", "pfbid", "story_fbid", "/photo", "/videos/", "/reel/"]):
+        if any(keyword in href for keyword in ["/posts/", "/permalink", "pfbid", "story_fbid", "/photo", "/videos/", "/reel/", "l.facebook.com"]):
             if not any(skip in href for skip in ["comment_id", "reply_comment_id", "/user/", "/friends/"]):
                 post_url = f"https://www.facebook.com{href}" if href.startswith('/') else href
                 break
@@ -378,25 +379,22 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
         e => e.querySelector('video') !== null || e.querySelector('a[href*="/videos/"], a[href*="/reel/"]') !== null
     """)
 
-    # تنظيف وتصفية النص المجلوب
     lines = [line.strip() for line in clean_post_text.split('\n') if line.strip()]
-    lines = [l for l in lines if not re.match(r'^(المرصد السوري|الحدث السوري|\d+\s*د|\d+\s*س|\.)$', l)]
+    lines = [l for l in lines if not re.match(r'^(\d+\s*د|\d+\s*س|\.)$', l)]
     real_post_text = "\n".join(lines).strip()
 
-    # 🎯 الشرط الذكي المحدث:
-    # إذا كان هناك نص منشور حقيقي (أكثر من 20 حرف)، نكتفي به ولا نقرأ الصورة.
-    # أما إذا كان المنشور بدون نص أصلي (أو مجرد توقيت واسم صفحة)، نقرأ الصورة عبر الـ OCR فوراً.
-    if len(real_post_text) >= 20:
+    if len(real_post_text) >= 5:
         clean_post_text = real_post_text
     elif image_url:
         ocr_text = await extract_text_from_image_url(http_session, image_url)
         if ocr_text:
             clean_post_text = ocr_text
-    elif len(real_post_text) < 10:
-        if has_video:
-            clean_post_text = "[منشور يحتوي على فيديو فقط]"
         else:
-            return None, None, None, None, False
+            clean_post_text = "[منشور يحتوي على صورة/رابط بدون نص]"
+    elif has_video:
+        clean_post_text = "[منشور يحتوي على فيديو فقط]"
+    else:
+        return None, None, None, None, False
 
     normalized_text_payload = re.sub(r'\s+', '', clean_post_text).strip().lower()
     clean_img_key = image_url.split('?')[0] if image_url else ""
@@ -468,27 +466,36 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
 
             element_selector = 'div[role="feed"] > div, div[role="article"], div[data-pagelet*="FeedUnit"]'
 
+            # 🎯 الدورة الأولى: تأسيس الحد المرجعي (Baseline)
             if first_run:
-                raw_elements = await page.query_selector_all(element_selector)
                 saved_initial = 0
-                for post_elem in raw_elements:
-                    post_id, text, post_url, img_url, has_video = await parse_single_post(post_elem, target_type, target_url, http_session)
-                    if not post_id:
-                        continue
-                    if not await is_post_exists(post_id):
-                        await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
-                        await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
-                        saved_initial += 1
+                for _ in range(3):
+                    raw_elements = await page.query_selector_all(element_selector)
+                    for post_elem in raw_elements:
+                        post_id, text, post_url, img_url, has_video = await parse_single_post(post_elem, target_type, target_url, http_session)
+                        if not post_id:
+                            continue
+                        if not await is_post_exists(post_id):
+                            await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
+                            await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
+                            saved_initial += 1
 
+                        if saved_initial >= 2:
+                            break
                     if saved_initial >= 2:
                         break
+                    await page.keyboard.press("PageDown")
+                    await page.wait_for_timeout(2000)
+
                 print(f"✅ Baseline established ({saved_initial} posts) for: {page_title}")
                 return
 
+            # 🎯 الدورات التالية: استمرار السكرول لأسفل حتى العثور على منشور مسجل مسبقاً
             seen_in_run = set()
-            for _ in range(5):
+            hit_old_post = False
+
+            for scroll_pass in range(10):
                 raw_elements = await page.query_selector_all(element_selector)
-                found_new_this_pass = False
 
                 for post_elem in raw_elements:
                     post_id, text, post_url, img_url, has_video = await parse_single_post(post_elem, target_type, target_url, http_session)
@@ -497,25 +504,23 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
 
                     seen_in_run.add(post_id)
 
+                    # 🛑 إذا وصل السكربت لأي منشور موجود مسبقاً في قاعدة البيانات، يتوقف السكرول فوراً
                     if await is_post_exists(post_id) or await is_content_duplicate(text):
-                        # منشور معروف مسبقًا — لا نتوقف هنا، فقط نتجاهله ونتابع فحص بقية
-                        # المنشورات الظاهرة (قد يكون هذا منشورًا مثبّتًا/معاد ترتيبه من فيسبوك
-                        # وليس بالضرورة يعني أن كل ما تحته قديم أيضًا).
-                        continue
+                        print(f"🛑 Encountered an already processed post in [{page_title}]. Stopping scroll.")
+                        hit_old_post = True
+                        break
 
+                    # ✨ منشور جديد: حفظ وإرسال
                     print(f"🚨 New Post Found in [{page_title}]!")
-                    found_new_this_pass = True
-
                     await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
                     await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
 
-                if not found_new_this_pass:
-                    # لم نجد أي شيء جديد في هذا التمرير الكامل للصفحة الظاهرة حاليًا —
-                    # لا داعي للتمرير لأسفل أكثر في هذه الدورة.
+                if hit_old_post:
                     break
 
+                print(f"📜 Scrolling down to check for more new posts... (Pass {scroll_pass + 1})")
                 await page.keyboard.press("PageDown")
-                await page.wait_for_timeout(2000)
+                await page.wait_for_timeout(2500)
 
         except Exception as e:
             print(f"❌ Error while monitoring {target_url}: {e}")
