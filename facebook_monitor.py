@@ -19,7 +19,7 @@ from PIL import Image
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# ==================== ⚙️ CONFIGURATION (from environment / .env) ====================
+# ==================== ⚙️ CONFIGURATION ====================
 load_dotenv()
 
 def _get_env(name, required=True, default=None):
@@ -46,14 +46,14 @@ DOWNLOAD_DIR = _get_env("DOWNLOAD_DIR", required=False, default="downloads")
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# قفل لمنع التزامن المتوازي بين الصفحات
+# قفل لمنع التزامن المتوازي بين المهام عند الكتابة في القاعدة
 db_lock: asyncio.Lock | None = None
 
 # ==================== 👁️ OCR ENGINE ====================
 print("⏳ Initializing EasyOCR Engine for Arabic & English text extraction...")
 ocr_reader = easyocr.Reader(['ar', 'en'], gpu=False, verbose=False)
 
-# ==================== 🗄️ TURSO DATABASE LAYER (raw HTTP) ====================
+# ==================== 🗄️ TURSO DATABASE LAYER ====================
 db_session: aiohttp.ClientSession | None = None
 TURSO_PIPELINE_URL: str | None = None
 
@@ -172,7 +172,7 @@ async def save_post_to_db(post_id, text, post_url, image_url, video_url, target_
         [post_id, text, post_url, image_url, video_url, target_type, target_url,
          datetime.now().strftime('%Y-%m-%d %H:%M:%S')]
     )
-    print(f"💾 Saved [{post_id[:8]}] to Turso!")
+    print(f"💾 Saved [{post_id[:12]}] to Turso!")
 
 # ==================== ✈️ ASYNC TELEGRAM BOT CLIENT ====================
 async def send_to_telegram(session, page_title, text, post_url, image_url=None, has_video=False):
@@ -198,7 +198,6 @@ async def send_to_telegram(session, page_title, text, post_url, image_url=None, 
                             await f.write(img_bytes)
 
                         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-
                         async with aiofiles.open(temp_img_path, 'rb') as f:
                             photo_data = await f.read()
 
@@ -278,6 +277,33 @@ async def extract_text_from_image_url(session, image_url):
 
     return ""
 
+# ==================== 🔑 FB ID EXTRACTION ====================
+def extract_facebook_post_id(url: str) -> str | None:
+    if not url:
+        return None
+    
+    # مطابقة معرّفات pfbid الحديثة
+    pfbid_match = re.search(r'pfbid([a-zA-Z0-9]+)', url)
+    if pfbid_match:
+        return f"pfbid_{pfbid_match.group(1)}"
+
+    # منشورات بالروابط القياسية /posts/123456
+    posts_match = re.search(r'/posts/(\d+)', url)
+    if posts_match:
+        return f"post_{posts_match.group(1)}"
+
+    # منشورات بالمعرّفات القديمة story_fbid أو fbid
+    fbid_match = re.search(r'(?:story_fbid=|fbid=)(\d+)', url)
+    if fbid_match:
+        return f"fbid_{fbid_match.group(1)}"
+
+    # مقاطع الفيديو والريلز
+    media_match = re.search(r'/(?:videos|reel|watch)\/(\d+)', url)
+    if media_match:
+        return f"media_{media_match.group(1)}"
+
+    return None
+
 async def parse_single_post(post_element, target_type, target_url, http_session):
     is_valid = await post_element.evaluate("""
         e => {
@@ -285,7 +311,7 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
             if (aria.includes('comment by') || aria.includes('reply by') || aria.includes('تعليق') || aria.includes('رد')) return false;
             let isInsideUl = e.closest('ul') !== null;
             let isComposer = e.querySelector('div[aria-label*="Write something"]') !== null || 
-                             e.querySelector('div[aria-label*="بماذا تفكر"]') !== null ||
+                             e.querySelector('div[aria-label*="بماذا تفكر"]') !== null || 
                              e.querySelector('div[aria-label*="أنشئ منشوراً"]') !== null;
             if (isInsideUl || isComposer) return false;
 
@@ -408,12 +434,18 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
     else:
         return None, None, None, None, False
 
-    normalized_text_payload = re.sub(r'\s+', '', clean_post_text).strip().lower()
-    clean_img_key = image_url.split('?')[0] if image_url else ""
-    clean_post_key = post_url.split('?')[0] if post_url != target_url else ""
+    # 🎯 توليد الـ Post ID الحقيقي الثابت بدقة لمنع التكرار
+    fb_id = extract_facebook_post_id(post_url)
+    if not fb_id and image_url:
+        fb_id = extract_facebook_post_id(image_url)
 
-    unique_seed = f"{clean_post_key}|{clean_img_key}|{normalized_text_payload[:150]}"
-    post_id = hashlib.md5(unique_seed.encode('utf-8')).hexdigest()
+    if fb_id:
+        post_id = fb_id
+    else:
+        # خيار احتياطي مع تنظيف الرموز لضمان الثبات
+        normalized_text = re.sub(r'[^ء-يa-zA-Z0-9]', '', clean_post_text).strip().lower()
+        unique_seed = f"{target_url}|{normalized_text[:120]}"
+        post_id = hashlib.md5(unique_seed.encode('utf-8')).hexdigest()
 
     return post_id, clean_post_text, post_url, image_url, has_video
 
@@ -504,11 +536,10 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
                 print(f"✅ Baseline established ({saved_initial} posts) for: {page_title}")
                 return
 
-            # 🎯 الدورات التالية: التمرير حتى الاصطدام بأول منشور مسجل مسبقاً (Stop-on-Known-Post)
+            # 🎯 الدورات التالية: الفحص حتى الوصول لأول منشور مسجل مسبقاً
             seen_in_run = set()
             hit_known_post = False
 
-            # أقصى حد للتمرير 5 مرات في حال كانت هناك عدة أخبار جديدة متتالية
             for scroll_pass in range(5):
                 raw_elements = await page.query_selector_all(element_selector)
 
@@ -521,18 +552,16 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
 
                     # 🔒 التحقق من قاعدة البيانات
                     async with db_lock:
-                        # إذا عثر على المنشور في Turso، يتوقف فوراً عن فحص باقي المنشورات والسكرول
                         if await is_post_exists(post_id) or await is_content_duplicate(text):
-                            print(f"🛑 Reached already known post in [{page_title}]. Stopping scroll.")
+                            print(f"🛑 Reached already known post [{post_id[:12]}] in [{page_title}]. Stopping scroll.")
                             hit_known_post = True
                             break
 
-                        # ✨ منشور جديد: يتم حفظه وإرساله
+                        # ✨ منشور جديد تماماً
                         print(f"🚨 New Post Found in [{page_title}]!")
                         await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
                         await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
 
-                # إذا اصطدم بمنشور قديم مخزن مسبقاً، نخرج من حلقة السكرول فوراً
                 if hit_known_post:
                     break
 
@@ -591,7 +620,7 @@ async def main():
                     print(f"🏁 Cycle finished in {elapsed}s.")
 
                     if RUN_ONCE:
-                        print("🏁 RUN_ONCE=true → إنهاء التنفيذ بعد دورة واحدة (الجدولة تُدار خارجيًا).")
+                        print("🏁 RUN_ONCE=true → إنهاء التنفيذ بعد دورة واحدة.")
                         break
 
                     print(f"💤 Waiting {CHECK_INTERVAL_SECONDS}s before next cycle...\n")
