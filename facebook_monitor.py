@@ -169,66 +169,96 @@ async def save_post_to_db(post_id, text, post_url, image_url, video_url, target_
     )
     print(f"💾 Saved [{post_id[:12]}] to Turso!")
 
-# ==================== ✈️ ASYNC TELEGRAM BOT CLIENT ====================
+# ==================== ✈️ ASYNC TELEGRAM BOT CLIENT (مع معالجة Fallback) ====================
 async def send_to_telegram(session, page_title, text, post_url, image_url=None, has_video=False):
     if not TELEGRAM_BOT_TOKEN:
         print("⚠️ لم يتم ضبط Telegram Bot Token!")
         return
 
-    caption = f"📢 *{page_title}*\n\n{text[:800]}\n\n"
+    # تنظيف عنوان الصفحة لتفادي كسر الـ Markdown
+    safe_title = re.sub(r'[*_`\[\]()]', '', page_title)
+    
+    caption_md = f"📢 *{safe_title}*\n\n{text[:800]}\n\n"
     if has_video:
-        caption += f"🎬 [مشاهدة البث / الفيديو على فيسبوك]({post_url})\n\n"
-    caption += f"🔗 [رابط المنشور الأصلي]({post_url})"
+        caption_md += f"🎬 [مشاهدة البث / الفيديو على فيسبوك]({post_url})\n\n"
+    caption_md += f"🔗 [رابط المنشور الأصلي]({post_url})"
 
-    try:
-        if image_url:
-            unique_filename = f"tg_{uuid.uuid4().hex}.jpg"
-            temp_img_path = os.path.join(DOWNLOAD_DIR, unique_filename)
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    caption_plain = f"📢 {safe_title}\n\n{text[:800]}\n\n"
+    if has_video:
+        caption_plain += f"🎬 رابط الفيديو: {post_url}\n\n"
+    caption_plain += f"🔗 رابط المنشور: {post_url}"
 
-            try:
-                async with session.get(image_url, headers=headers, timeout=15) as img_resp:
-                    if img_resp.status == 200:
-                        img_bytes = await img_resp.read()
-                        async with aiofiles.open(temp_img_path, 'wb') as f:
-                            await f.write(img_bytes)
+    sent_successfully = False
 
-                        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-                        async with aiofiles.open(temp_img_path, 'rb') as f:
-                            photo_data = await f.read()
+    # 1. محاولة إرسال الصورة إذا وجدت
+    if image_url:
+        unique_filename = f"tg_{uuid.uuid4().hex}.jpg"
+        temp_img_path = os.path.join(DOWNLOAD_DIR, unique_filename)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+        }
 
-                        data = aiohttp.FormData()
-                        data.add_field('chat_id', TELEGRAM_CHAT_ID)
-                        data.add_field('caption', caption)
-                        data.add_field('parse_mode', 'Markdown')
-                        data.add_field('photo', photo_data, filename="image.jpg")
+        try:
+            async with session.get(image_url, headers=headers, timeout=15) as img_resp:
+                if img_resp.status == 200:
+                    img_bytes = await img_resp.read()
+                    async with aiofiles.open(temp_img_path, 'wb') as f:
+                        await f.write(img_bytes)
 
-                        async with session.post(url, data=data, timeout=20) as resp:
-                            if resp.status == 200:
-                                print(f"✈️ [Telegram]: Photo + Link sent for {page_title}")
+                    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+                    async with aiofiles.open(temp_img_path, 'rb') as f:
+                        photo_data = await f.read()
 
-                        if os.path.exists(temp_img_path):
-                            try:
-                                os.remove(temp_img_path)
-                            except Exception:
-                                pass
-                        return
-            except Exception as img_err:
-                print(f"⚠️ Failed to process image for Telegram: {img_err}")
-                if os.path.exists(temp_img_path):
-                    try:
-                        os.remove(temp_img_path)
-                    except Exception:
-                        pass
+                    data = aiohttp.FormData()
+                    data.add_field('chat_id', TELEGRAM_CHAT_ID)
+                    data.add_field('caption', caption_md)
+                    data.add_field('parse_mode', 'Markdown')
+                    data.add_field('photo', photo_data, filename="image.jpg")
 
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': caption, 'parse_mode': 'Markdown', 'disable_web_page_preview': False}
-        async with session.post(url, json=payload, timeout=15) as resp:
-            if resp.status == 200:
-                print(f"✈️ [Telegram]: Text & Link sent for {page_title}")
+                    async with session.post(url, data=data, timeout=20) as resp:
+                        if resp.status == 200:
+                            print(f"✈️ [Telegram]: Photo + Link sent for {safe_title}")
+                            sent_successfully = True
+                        else:
+                            # محاولة إرسال الصورة مع نص عادي بدون Markdown إذا فشل التنسيق
+                            data_fallback = aiohttp.FormData()
+                            data_fallback.add_field('chat_id', TELEGRAM_CHAT_ID)
+                            data_fallback.add_field('caption', caption_plain)
+                            data_fallback.add_field('photo', photo_data, filename="image.jpg")
+                            async with session.post(url, data=data_fallback, timeout=20) as resp2:
+                                if resp2.status == 200:
+                                    print(f"✈️ [Telegram]: Photo + Plain text sent for {safe_title}")
+                                    sent_successfully = True
 
-    except Exception as e:
-        print(f"⚠️ Telegram sending failed: {e}")
+        except Exception as img_err:
+            print(f"⚠️ Failed to process image ({img_err}), falling back to text.")
+        finally:
+            if os.path.exists(temp_img_path):
+                try:
+                    os.remove(temp_img_path)
+                except Exception:
+                    pass
+
+    # 2. في حال عدم وجود صورة أو فشل إرسالها، الإرسال كنص حتمي
+    if not sent_successfully:
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': caption_md, 'parse_mode': 'Markdown', 'disable_web_page_preview': False}
+            async with session.post(url, json=payload, timeout=15) as resp:
+                if resp.status == 200:
+                    print(f"✈️ [Telegram]: Text & Link sent for {safe_title}")
+                else:
+                    # محاولة أخيرة كنص عادي بدون أي Markdown
+                    payload_plain = {'chat_id': TELEGRAM_CHAT_ID, 'text': caption_plain, 'disable_web_page_preview': False}
+                    async with session.post(url, json=payload_plain, timeout=15) as resp2:
+                        if resp2.status == 200:
+                            print(f"✈️ [Telegram]: Plain text sent for {safe_title}")
+                        else:
+                            err_txt = await resp2.text()
+                            print(f"❌ Telegram Send Failed ({resp2.status}): {err_txt}")
+        except Exception as e:
+            print(f"⚠️ Telegram text sending failed: {e}")
 
 # ==================== 👁️ RAW EASYOCR ENGINE ====================
 async def extract_text_from_image_url(session, image_url):
@@ -403,7 +433,7 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
                 post_url = f"https://www.facebook.com{href}" if href.startswith('/') else href
                 break
 
-    # 🎬 كشف دقيق للفيديوهات والبث المباشر
+    # كشف الفيديو والبث المباشر
     has_video = await post_element.evaluate("""
         e => e.querySelector('video, [data-video-id], [aria-label*="تشغيل"], [aria-label*="Play"]') !== null || 
              e.querySelector('a[href*="/videos/"], a[href*="/reel/"], a[href*="/watch"], a[href*="/live/"]') !== null ||
@@ -414,7 +444,7 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
     lines = [l for l in lines if not re.match(r'^(المرصد السوري|الحدث السوري|رامي عبد الرحمن|\d+\s*د|\d+\s*س|\.|\s*)$', l)]
     real_post_text = "\n".join(lines).strip()
 
-    # 📝 تحديد النص النهائي
+    # تحديد النص النهائي بدقة
     if len(real_post_text) >= 10:
         clean_post_text = real_post_text
     elif has_video:
@@ -427,7 +457,7 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
     else:
         clean_post_text = "[منشور على فيسبوك]"
 
-    # 🎯 توليد معرّف المنشور الثابت
+    # استخراج معرف المنشور الثابت
     fb_id = extract_facebook_post_id(post_url)
     if not fb_id and image_url:
         fb_id = extract_facebook_post_id(image_url)
@@ -513,7 +543,6 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
                             continue
                         
                         async with db_lock:
-                            # الاعتماد كلياً على وجود المنشور لمنع التكرار وحفظ وإرسال كل عنصر فوراً
                             if not await is_post_exists(post_id):
                                 await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
                                 await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
@@ -549,7 +578,7 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
                             hit_known_post = True
                             break
 
-                        # ✨ منشور جديد تماماً: يتم الحفظ والإرسال فوراً
+                        # منشور جديد: حفظ وإرسال فوري
                         print(f"🚨 New Post Found in [{page_title}]!")
                         await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
                         await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
