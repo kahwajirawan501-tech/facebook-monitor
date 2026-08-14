@@ -157,7 +157,7 @@ async def is_post_exists(post_id):
     rows = await _turso_execute('SELECT 1 FROM posts WHERE id = ?', [post_id])
     return len(rows) > 0
 
-# فحص التكرار الدقيق بنفس المنطق الأصلي المستقر لمنع الخلط بين الأخبار
+# فحص التكرار الدقيق لمنع الخلط بين الأخبار
 async def is_content_duplicate(clean_text):
     if not clean_text or len(clean_text) < 10:
         return False
@@ -388,20 +388,26 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
              (e.innerText && (e.innerText.includes('مباشر') || e.innerText.includes('LIVE')))
     """)
 
+    # تصفية السطور وحذف أسماء الصفحات والنقاط والرموز العشوائية
     lines = [line.strip() for line in clean_post_text.split('\n') if line.strip()]
-    lines = [l for l in lines if not re.match(r'^(\d+\s*د|\d+\s*س|\.)$', l)]
+    lines = [l for l in lines if not re.match(r'^(المرصد السوري|الحدث السوري|رامي عبد الرحمن|\d+\s*د|\d+\s*س|\.|\s*)$', l)]
     real_post_text = "\n".join(lines).strip()
 
-    if len(real_post_text) >= 5:
+    # إذا كان النص الحقيقي أطول من 20 حرفاً نعتمد عليه، وإلا نقرأ الصورة فوراً عبر OCR
+    if len(real_post_text) >= 20:
         clean_post_text = real_post_text
     elif image_url:
         ocr_text = await extract_text_from_image_url(http_session, image_url)
         if ocr_text:
             clean_post_text = ocr_text
+        elif len(real_post_text) >= 5:
+            clean_post_text = real_post_text
         else:
             clean_post_text = "[منشور يحتوي على صورة/معاينة رابط]"
     elif has_video:
         clean_post_text = "[بث مباشر / مقطع فيديو]"
+    elif len(real_post_text) >= 5:
+        clean_post_text = real_post_text
     else:
         return None, None, None, None, False
 
