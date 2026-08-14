@@ -46,6 +46,9 @@ DOWNLOAD_DIR = _get_env("DOWNLOAD_DIR", required=False, default="downloads")
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+# قفل لمنع التكرار والتزامن المتوازي بين الصفحات الشقيقة
+db_lock: asyncio.Lock | None = None
+
 # ==================== 👁️ OCR ENGINE ====================
 print("⏳ Initializing EasyOCR Engine for Arabic & English text extraction...")
 ocr_reader = easyocr.Reader(['ar', 'en'], gpu=False, verbose=False)
@@ -155,12 +158,21 @@ async def is_post_exists(post_id):
     return len(rows) > 0
 
 async def is_content_duplicate(clean_text):
-    if not clean_text or len(clean_text) < 10:
+    if not clean_text or len(clean_text) < 15:
         return False
-    rows = await _turso_execute(
-        'SELECT 1 FROM posts WHERE text = ? ORDER BY created_at DESC LIMIT 30', [clean_text]
-    )
-    return len(rows) > 0
+    
+    # تنظيف النص لمقارنة متقدمة بين الصفحات الشقيقة
+    normalized = re.sub(r'[^\w\s]', '', clean_text).strip()
+    sample = normalized[:80] if len(normalized) >= 80 else normalized
+
+    rows = await _turso_execute('SELECT text FROM posts ORDER BY created_at DESC LIMIT 50')
+    for (stored_text,) in rows:
+        if not stored_text:
+            continue
+        stored_norm = re.sub(r'[^\w\s]', '', stored_text).strip()
+        if sample in stored_norm or stored_norm[:80] in normalized:
+            return True
+    return False
 
 async def save_post_to_db(post_id, text, post_url, image_url, video_url, target_type, target_url):
     await _turso_execute(
@@ -366,7 +378,6 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
         }
     """)
 
-    # تحسين استخراج الروابط لتشمل البث المباشر watch و live
     all_links = await post_element.query_selector_all('a[href]')
     post_url = target_url
     for link in all_links:
@@ -379,7 +390,6 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
                 post_url = f"https://www.facebook.com{href}" if href.startswith('/') else href
                 break
 
-    # تحسين كشف الفيديو أو البث المباشر
     has_video = await post_element.evaluate("""
         e => e.querySelector('video') !== null || 
              e.querySelector('a[href*="/videos/"], a[href*="/reel/"], a[href*="/watch"], a[href*="/live/"]') !== null ||
@@ -482,10 +492,12 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
                         post_id, text, post_url, img_url, has_video = await parse_single_post(post_elem, target_type, target_url, http_session)
                         if not post_id:
                             continue
-                        if not await is_post_exists(post_id):
-                            await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
-                            await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
-                            saved_initial += 1
+                        
+                        async with db_lock:
+                            if not await is_post_exists(post_id) and not await is_content_duplicate(text):
+                                await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
+                                await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
+                                saved_initial += 1
 
                         if saved_initial >= 2:
                             break
@@ -511,16 +523,17 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
 
                     seen_in_run.add(post_id)
 
-                    # 🛑 إذا وجد منشوراً موجوداً مسبقاً، يتوقف السكرول فوراً
-                    if await is_post_exists(post_id) or await is_content_duplicate(text):
-                        print(f"🛑 Encountered an already processed post in [{page_title}]. Stopping scroll.")
-                        hit_old_post = True
-                        break
+                    # 🔒 استخدام قفل التزامن لمنع إرسال نفس الخبر إذا تم رصده في صفحتين شقيقتين بنفس الثانية
+                    async with db_lock:
+                        if await is_post_exists(post_id) or await is_content_duplicate(text):
+                            print(f"🛑 Already processed in [{page_title}]. Stopping scroll.")
+                            hit_old_post = True
+                            break
 
-                    # ✨ منشور جديد
-                    print(f"🚨 New Post Found in [{page_title}]!")
-                    await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
-                    await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
+                        # ✨ منشور جديد: حفظ فوري ثم إرسال لتلغرام
+                        print(f"🚨 New Post Found in [{page_title}]!")
+                        await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
+                        await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
 
                 if hit_old_post:
                     break
@@ -536,6 +549,8 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
 
 # ==================== 🚀 MAIN ASYNC LOOP ====================
 async def main():
+    global db_lock
+    db_lock = asyncio.Lock()
     await init_db()
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 
