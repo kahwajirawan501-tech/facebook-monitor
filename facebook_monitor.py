@@ -160,14 +160,6 @@ async def is_post_exists(post_id):
     rows = await _turso_execute('SELECT 1 FROM posts WHERE id = ?', [post_id])
     return len(rows) > 0
 
-async def is_content_duplicate(clean_text):
-    if not clean_text or len(clean_text) < 15 or clean_text.startswith("["):
-        return False
-    rows = await _turso_execute(
-        'SELECT 1 FROM posts WHERE text = ? ORDER BY created_at DESC LIMIT 30', [clean_text]
-    )
-    return len(rows) > 0
-
 async def save_post_to_db(post_id, text, post_url, image_url, video_url, target_type, target_url):
     await _turso_execute(
         '''INSERT INTO posts (id, text, post_url, image_url, video_url, target_type, target_url, created_at)
@@ -422,7 +414,7 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
     lines = [l for l in lines if not re.match(r'^(المرصد السوري|الحدث السوري|رامي عبد الرحمن|\d+\s*د|\d+\s*س|\.|\s*)$', l)]
     real_post_text = "\n".join(lines).strip()
 
-    # 📝 تحديد النص النهائي دون إهمال أي منشور
+    # 📝 تحديد النص النهائي
     if len(real_post_text) >= 10:
         clean_post_text = real_post_text
     elif has_video:
@@ -435,7 +427,7 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
     else:
         clean_post_text = "[منشور على فيسبوك]"
 
-    # 🎯 توليد الـ Post ID الحقيقي الثابت بدقة
+    # 🎯 توليد معرّف المنشور الثابت
     fb_id = extract_facebook_post_id(post_url)
     if not fb_id and image_url:
         fb_id = extract_facebook_post_id(image_url)
@@ -521,7 +513,8 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
                             continue
                         
                         async with db_lock:
-                            if not await is_post_exists(post_id) and not await is_content_duplicate(text):
+                            # الاعتماد كلياً على وجود المنشور لمنع التكرار وحفظ وإرسال كل عنصر فوراً
+                            if not await is_post_exists(post_id):
                                 await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
                                 await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
                                 saved_initial += 1
@@ -551,12 +544,12 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
                     seen_in_run.add(post_id)
 
                     async with db_lock:
-                        if await is_post_exists(post_id) or await is_content_duplicate(text):
+                        if await is_post_exists(post_id):
                             print(f"🛑 Reached already known post [{post_id[:12]}] in [{page_title}]. Stopping scroll.")
                             hit_known_post = True
                             break
 
-                        # ✨ منشور جديد تماماً
+                        # ✨ منشور جديد تماماً: يتم الحفظ والإرسال فوراً
                         print(f"🚨 New Post Found in [{page_title}]!")
                         await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
                         await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
