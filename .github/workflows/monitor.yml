@@ -15,7 +15,7 @@ concurrency:
 jobs:
   run-monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 4   # أقل بوضوح من الفاصل الزمني (5 دقائق) حتى لا تتراكم التشغيلات أبدًا
+    timeout-minutes: 8   # أقل بوضوح من الفاصل الزمني (5 دقائق) حتى لا تتراكم التشغيلات أبدًا
 
     steps:
       - name: Checkout repo
