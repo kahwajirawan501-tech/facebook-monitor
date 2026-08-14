@@ -2,6 +2,7 @@ import os
 import re
 import io
 import json
+import uuid
 import asyncio
 import hashlib
 import warnings
@@ -23,10 +24,12 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 load_dotenv()
 
 def _get_env(name, required=True, default=None):
-    val = os.environ.get(name, default)
-    if required and not val:
-        raise RuntimeError(f"❌ متغير البيئة المطلوب غير موجود: {name}")
-    return val
+    val = os.environ.get(name)
+    if val is None or val.strip() == "":
+        if required:
+            raise RuntimeError(f"❌ متغير البيئة المطلوب غير موجود: {name}")
+        return default
+    return val.strip()
 
 TARGET_URLS = [u.strip() for u in _get_env("TARGET_URLS").split(",") if u.strip()]
 
@@ -46,7 +49,7 @@ DOWNLOAD_DIR = _get_env("DOWNLOAD_DIR", required=False, default="downloads")
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# قفل لمنع التزامن المتوازي بين المهام عند الكتابة في القاعدة
+# قفل لمنع تضارب الكتابة في قاعدة البيانات
 db_lock: asyncio.Lock | None = None
 
 # ==================== 👁️ OCR ENGINE ====================
@@ -158,7 +161,7 @@ async def is_post_exists(post_id):
     return len(rows) > 0
 
 async def is_content_duplicate(clean_text):
-    if not clean_text or len(clean_text) < 10:
+    if not clean_text or len(clean_text) < 15 or clean_text.startswith("["):
         return False
     rows = await _turso_execute(
         'SELECT 1 FROM posts WHERE text = ? ORDER BY created_at DESC LIMIT 30', [clean_text]
@@ -187,7 +190,8 @@ async def send_to_telegram(session, page_title, text, post_url, image_url=None, 
 
     try:
         if image_url:
-            temp_img_path = os.path.join(DOWNLOAD_DIR, f"tg_{hashlib.md5(image_url.encode()).hexdigest()[:8]}.jpg")
+            unique_filename = f"tg_{uuid.uuid4().hex}.jpg"
+            temp_img_path = os.path.join(DOWNLOAD_DIR, unique_filename)
             headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
             try:
@@ -241,7 +245,8 @@ async def extract_text_from_image_url(session, image_url):
 
     full_url = urljoin("https://www.facebook.com", image_url)
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    temp_img_path = os.path.join(DOWNLOAD_DIR, f"temp_ocr_{hashlib.md5(image_url.encode()).hexdigest()[:8]}.jpg")
+    unique_filename = f"temp_ocr_{uuid.uuid4().hex}.jpg"
+    temp_img_path = os.path.join(DOWNLOAD_DIR, unique_filename)
 
     try:
         async with session.get(full_url, headers=headers, timeout=15) as resp:
@@ -282,28 +287,25 @@ def extract_facebook_post_id(url: str) -> str | None:
     if not url:
         return None
     
-    # مطابقة معرّفات pfbid الحديثة
     pfbid_match = re.search(r'pfbid([a-zA-Z0-9]+)', url)
     if pfbid_match:
         return f"pfbid_{pfbid_match.group(1)}"
 
-    # منشورات بالروابط القياسية /posts/123456
     posts_match = re.search(r'/posts/(\d+)', url)
     if posts_match:
         return f"post_{posts_match.group(1)}"
 
-    # منشورات بالمعرّفات القديمة story_fbid أو fbid
     fbid_match = re.search(r'(?:story_fbid=|fbid=)(\d+)', url)
     if fbid_match:
         return f"fbid_{fbid_match.group(1)}"
 
-    # مقاطع الفيديو والريلز
     media_match = re.search(r'/(?:videos|reel|watch)\/(\d+)', url)
     if media_match:
         return f"media_{media_match.group(1)}"
 
     return None
 
+# ==================== 📄 POST PARSER ====================
 async def parse_single_post(post_element, target_type, target_url, http_session):
     is_valid = await post_element.evaluate("""
         e => {
@@ -331,11 +333,13 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
     if not is_valid:
         return None, None, None, None, False
 
+    # توسيع النصوص الطويلة
     await post_element.evaluate("""
         el => {
-            const btns = Array.from(el.querySelectorAll('*'));
+            const btns = Array.from(el.querySelectorAll('div[role="button"], span[role="button"], a, span'));
             btns.forEach(b => {
-                if (b.innerText && (b.innerText === 'عرض المزيد' || b.innerText === 'See more')) {
+                let txt = (b.innerText || '').trim();
+                if (txt === 'عرض المزيد' || txt === 'See more') {
                     try { b.click(); } catch(e) {}
                 }
             });
@@ -407,34 +411,31 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
                 post_url = f"https://www.facebook.com{href}" if href.startswith('/') else href
                 break
 
+    # 🎬 كشف دقيق للفيديوهات والبث المباشر
     has_video = await post_element.evaluate("""
-        e => e.querySelector('video') !== null || 
+        e => e.querySelector('video, [data-video-id], [aria-label*="تشغيل"], [aria-label*="Play"]') !== null || 
              e.querySelector('a[href*="/videos/"], a[href*="/reel/"], a[href*="/watch"], a[href*="/live/"]') !== null ||
-             (e.innerText && (e.innerText.includes('مباشر') || e.innerText.includes('LIVE')))
+             (e.innerText && (e.innerText.includes('مباشر') || e.innerText.includes('LIVE') || e.innerText.includes('فيديو')))
     """)
 
     lines = [line.strip() for line in clean_post_text.split('\n') if line.strip()]
     lines = [l for l in lines if not re.match(r'^(المرصد السوري|الحدث السوري|رامي عبد الرحمن|\d+\s*د|\d+\s*س|\.|\s*)$', l)]
     real_post_text = "\n".join(lines).strip()
 
-    if len(real_post_text) >= 20:
+    # 📝 تحديد النص النهائي دون إهمال أي منشور
+    if len(real_post_text) >= 10:
         clean_post_text = real_post_text
+    elif has_video:
+        clean_post_text = real_post_text if real_post_text else "[بث مباشر / مقطع فيديو]"
     elif image_url:
         ocr_text = await extract_text_from_image_url(http_session, image_url)
-        if ocr_text:
-            clean_post_text = ocr_text
-        elif len(real_post_text) >= 5:
-            clean_post_text = real_post_text
-        else:
-            clean_post_text = "[منشور يحتوي على صورة/معاينة رابط]"
-    elif has_video:
-        clean_post_text = "[بث مباشر / مقطع فيديو]"
-    elif len(real_post_text) >= 5:
+        clean_post_text = ocr_text if ocr_text else (real_post_text if real_post_text else "[منشور يحتوي على صورة]")
+    elif len(real_post_text) >= 1:
         clean_post_text = real_post_text
     else:
-        return None, None, None, None, False
+        clean_post_text = "[منشور على فيسبوك]"
 
-    # 🎯 توليد الـ Post ID الحقيقي الثابت بدقة لمنع التكرار
+    # 🎯 توليد الـ Post ID الحقيقي الثابت بدقة
     fb_id = extract_facebook_post_id(post_url)
     if not fb_id and image_url:
         fb_id = extract_facebook_post_id(image_url)
@@ -442,7 +443,6 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
     if fb_id:
         post_id = fb_id
     else:
-        # خيار احتياطي مع تنظيف الرموز لضمان الثبات
         normalized_text = re.sub(r'[^ء-يa-zA-Z0-9]', '', clean_post_text).strip().lower()
         unique_seed = f"{target_url}|{normalized_text[:120]}"
         post_id = hashlib.md5(unique_seed.encode('utf-8')).hexdigest()
@@ -550,7 +550,6 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
 
                     seen_in_run.add(post_id)
 
-                    # 🔒 التحقق من قاعدة البيانات
                     async with db_lock:
                         if await is_post_exists(post_id) or await is_content_duplicate(text):
                             print(f"🛑 Reached already known post [{post_id[:12]}] in [{page_title}]. Stopping scroll.")
@@ -582,6 +581,9 @@ async def main():
 
     print("🚀 Facebook Parallel Engine Started...")
     print(f"🎯 Total Targets: {len(TARGET_URLS)} | Concurrency Limit: {MAX_CONCURRENT_TASKS}")
+
+    browser = None
+    context = None
 
     try:
         async with async_playwright() as p:
@@ -628,8 +630,10 @@ async def main():
     finally:
         await close_db()
         try:
-            await context.close()
-            await browser.close()
+            if context:
+                await context.close()
+            if browser:
+                await browser.close()
         except Exception:
             pass
 
