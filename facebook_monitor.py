@@ -157,7 +157,6 @@ async def is_post_exists(post_id):
     rows = await _turso_execute('SELECT 1 FROM posts WHERE id = ?', [post_id])
     return len(rows) > 0
 
-# فحص التكرار الدقيق لمنع الخلط بين الأخبار
 async def is_content_duplicate(clean_text):
     if not clean_text or len(clean_text) < 10:
         return False
@@ -388,12 +387,10 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
              (e.innerText && (e.innerText.includes('مباشر') || e.innerText.includes('LIVE')))
     """)
 
-    # تصفية السطور وحذف أسماء الصفحات والنقاط والرموز العشوائية
     lines = [line.strip() for line in clean_post_text.split('\n') if line.strip()]
     lines = [l for l in lines if not re.match(r'^(المرصد السوري|الحدث السوري|رامي عبد الرحمن|\d+\s*د|\d+\s*س|\.|\s*)$', l)]
     real_post_text = "\n".join(lines).strip()
 
-    # إذا كان النص الحقيقي أطول من 20 حرفاً نعتمد عليه، وإلا نقرأ الصورة فوراً عبر OCR
     if len(real_post_text) >= 20:
         clean_post_text = real_post_text
     elif image_url:
@@ -507,10 +504,12 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
                 print(f"✅ Baseline established ({saved_initial} posts) for: {page_title}")
                 return
 
-            # 🎯 الدورات التالية: التمرير وفحص كافة المنشورات دون توقف مفاجئ
+            # 🎯 الدورات التالية: التمرير حتى الاصطدام بأول منشور مسجل مسبقاً (Stop-on-Known-Post)
             seen_in_run = set()
+            hit_known_post = False
 
-            for scroll_pass in range(4):
+            # أقصى حد للتمرير 5 مرات في حال كانت هناك عدة أخبار جديدة متتالية
+            for scroll_pass in range(5):
                 raw_elements = await page.query_selector_all(element_selector)
 
                 for post_elem in raw_elements:
@@ -520,16 +519,22 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
 
                     seen_in_run.add(post_id)
 
-                    # 🔒 التحقق مع قفل التزامن البرمجي
+                    # 🔒 التحقق من قاعدة البيانات
                     async with db_lock:
+                        # إذا عثر على المنشور في Turso، يتوقف فوراً عن فحص باقي المنشورات والسكرول
                         if await is_post_exists(post_id) or await is_content_duplicate(text):
-                            # إذا كان منشوراً قديماً: نتجاهله ونتابع فحص باقي المنشورات في الصفحة (لا نوقف السكرول)
-                            continue
+                            print(f"🛑 Reached already known post in [{page_title}]. Stopping scroll.")
+                            hit_known_post = True
+                            break
 
-                        # ✨ منشور جديد لم يُرصد سابقاً
+                        # ✨ منشور جديد: يتم حفظه وإرساله
                         print(f"🚨 New Post Found in [{page_title}]!")
                         await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
                         await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
+
+                # إذا اصطدم بمنشور قديم مخزن مسبقاً، نخرج من حلقة السكرول فوراً
+                if hit_known_post:
+                    break
 
                 await page.keyboard.press("PageDown")
                 await page.wait_for_timeout(2000)
