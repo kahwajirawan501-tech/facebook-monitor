@@ -2,6 +2,7 @@ import os
 import re
 import io
 import json
+import uuid
 import asyncio
 import hashlib
 import warnings
@@ -19,14 +20,16 @@ from PIL import Image
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# ==================== ⚙️ CONFIGURATION (from environment / .env) ====================
+# ==================== ⚙️ CONFIGURATION ====================
 load_dotenv()
 
 def _get_env(name, required=True, default=None):
-    val = os.environ.get(name, default)
-    if required and not val:
-        raise RuntimeError(f"❌ متغير البيئة المطلوب غير موجود: {name}")
-    return val
+    val = os.environ.get(name)
+    if val is None or val.strip() == "":
+        if required:
+            raise RuntimeError(f"❌ متغير البيئة المطلوب غير موجود: {name}")
+        return default
+    return val.strip()
 
 TARGET_URLS = [u.strip() for u in _get_env("TARGET_URLS").split(",") if u.strip()]
 
@@ -46,14 +49,14 @@ DOWNLOAD_DIR = _get_env("DOWNLOAD_DIR", required=False, default="downloads")
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# قفل لمنع التزامن المتوازي بين الصفحات
+# قفل لمنع تضارب الكتابة في قاعدة البيانات
 db_lock: asyncio.Lock | None = None
 
 # ==================== 👁️ OCR ENGINE ====================
 print("⏳ Initializing EasyOCR Engine for Arabic & English text extraction...")
 ocr_reader = easyocr.Reader(['ar', 'en'], gpu=False, verbose=False)
 
-# ==================== 🗄️ TURSO DATABASE LAYER (raw HTTP) ====================
+# ==================== 🗄️ TURSO DATABASE LAYER ====================
 db_session: aiohttp.ClientSession | None = None
 TURSO_PIPELINE_URL: str | None = None
 
@@ -157,14 +160,6 @@ async def is_post_exists(post_id):
     rows = await _turso_execute('SELECT 1 FROM posts WHERE id = ?', [post_id])
     return len(rows) > 0
 
-async def is_content_duplicate(clean_text):
-    if not clean_text or len(clean_text) < 10:
-        return False
-    rows = await _turso_execute(
-        'SELECT 1 FROM posts WHERE text = ? ORDER BY created_at DESC LIMIT 30', [clean_text]
-    )
-    return len(rows) > 0
-
 async def save_post_to_db(post_id, text, post_url, image_url, video_url, target_type, target_url):
     await _turso_execute(
         '''INSERT INTO posts (id, text, post_url, image_url, video_url, target_type, target_url, created_at)
@@ -172,68 +167,98 @@ async def save_post_to_db(post_id, text, post_url, image_url, video_url, target_
         [post_id, text, post_url, image_url, video_url, target_type, target_url,
          datetime.now().strftime('%Y-%m-%d %H:%M:%S')]
     )
-    print(f"💾 Saved [{post_id[:8]}] to Turso!")
+    print(f"💾 Saved [{post_id[:12]}] to Turso!")
 
-# ==================== ✈️ ASYNC TELEGRAM BOT CLIENT ====================
+# ==================== ✈️ ASYNC TELEGRAM BOT CLIENT (مع معالجة Fallback) ====================
 async def send_to_telegram(session, page_title, text, post_url, image_url=None, has_video=False):
     if not TELEGRAM_BOT_TOKEN:
         print("⚠️ لم يتم ضبط Telegram Bot Token!")
         return
 
-    caption = f"📢 *{page_title}*\n\n{text[:800]}\n\n"
+    # تنظيف عنوان الصفحة لتفادي كسر الـ Markdown
+    safe_title = re.sub(r'[*_`\[\]()]', '', page_title)
+    
+    caption_md = f"📢 *{safe_title}*\n\n{text[:800]}\n\n"
     if has_video:
-        caption += f"🎬 [مشاهدة البث / الفيديو على فيسبوك]({post_url})\n\n"
-    caption += f"🔗 [رابط المنشور الأصلي]({post_url})"
+        caption_md += f"🎬 [مشاهدة البث / الفيديو على فيسبوك]({post_url})\n\n"
+    caption_md += f"🔗 [رابط المنشور الأصلي]({post_url})"
 
-    try:
-        if image_url:
-            temp_img_path = os.path.join(DOWNLOAD_DIR, f"tg_{hashlib.md5(image_url.encode()).hexdigest()[:8]}.jpg")
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    caption_plain = f"📢 {safe_title}\n\n{text[:800]}\n\n"
+    if has_video:
+        caption_plain += f"🎬 رابط الفيديو: {post_url}\n\n"
+    caption_plain += f"🔗 رابط المنشور: {post_url}"
 
-            try:
-                async with session.get(image_url, headers=headers, timeout=15) as img_resp:
-                    if img_resp.status == 200:
-                        img_bytes = await img_resp.read()
-                        async with aiofiles.open(temp_img_path, 'wb') as f:
-                            await f.write(img_bytes)
+    sent_successfully = False
 
-                        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    # 1. محاولة إرسال الصورة إذا وجدت
+    if image_url:
+        unique_filename = f"tg_{uuid.uuid4().hex}.jpg"
+        temp_img_path = os.path.join(DOWNLOAD_DIR, unique_filename)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+        }
 
-                        async with aiofiles.open(temp_img_path, 'rb') as f:
-                            photo_data = await f.read()
+        try:
+            async with session.get(image_url, headers=headers, timeout=15) as img_resp:
+                if img_resp.status == 200:
+                    img_bytes = await img_resp.read()
+                    async with aiofiles.open(temp_img_path, 'wb') as f:
+                        await f.write(img_bytes)
 
-                        data = aiohttp.FormData()
-                        data.add_field('chat_id', TELEGRAM_CHAT_ID)
-                        data.add_field('caption', caption)
-                        data.add_field('parse_mode', 'Markdown')
-                        data.add_field('photo', photo_data, filename="image.jpg")
+                    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+                    async with aiofiles.open(temp_img_path, 'rb') as f:
+                        photo_data = await f.read()
 
-                        async with session.post(url, data=data, timeout=20) as resp:
-                            if resp.status == 200:
-                                print(f"✈️ [Telegram]: Photo + Link sent for {page_title}")
+                    data = aiohttp.FormData()
+                    data.add_field('chat_id', TELEGRAM_CHAT_ID)
+                    data.add_field('caption', caption_md)
+                    data.add_field('parse_mode', 'Markdown')
+                    data.add_field('photo', photo_data, filename="image.jpg")
 
-                        if os.path.exists(temp_img_path):
-                            try:
-                                os.remove(temp_img_path)
-                            except Exception:
-                                pass
-                        return
-            except Exception as img_err:
-                print(f"⚠️ Failed to process image for Telegram: {img_err}")
-                if os.path.exists(temp_img_path):
-                    try:
-                        os.remove(temp_img_path)
-                    except Exception:
-                        pass
+                    async with session.post(url, data=data, timeout=20) as resp:
+                        if resp.status == 200:
+                            print(f"✈️ [Telegram]: Photo + Link sent for {safe_title}")
+                            sent_successfully = True
+                        else:
+                            # محاولة إرسال الصورة مع نص عادي بدون Markdown إذا فشل التنسيق
+                            data_fallback = aiohttp.FormData()
+                            data_fallback.add_field('chat_id', TELEGRAM_CHAT_ID)
+                            data_fallback.add_field('caption', caption_plain)
+                            data_fallback.add_field('photo', photo_data, filename="image.jpg")
+                            async with session.post(url, data=data_fallback, timeout=20) as resp2:
+                                if resp2.status == 200:
+                                    print(f"✈️ [Telegram]: Photo + Plain text sent for {safe_title}")
+                                    sent_successfully = True
 
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': caption, 'parse_mode': 'Markdown', 'disable_web_page_preview': False}
-        async with session.post(url, json=payload, timeout=15) as resp:
-            if resp.status == 200:
-                print(f"✈️ [Telegram]: Text & Link sent for {page_title}")
+        except Exception as img_err:
+            print(f"⚠️ Failed to process image ({img_err}), falling back to text.")
+        finally:
+            if os.path.exists(temp_img_path):
+                try:
+                    os.remove(temp_img_path)
+                except Exception:
+                    pass
 
-    except Exception as e:
-        print(f"⚠️ Telegram sending failed: {e}")
+    # 2. في حال عدم وجود صورة أو فشل إرسالها، الإرسال كنص حتمي
+    if not sent_successfully:
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': caption_md, 'parse_mode': 'Markdown', 'disable_web_page_preview': False}
+            async with session.post(url, json=payload, timeout=15) as resp:
+                if resp.status == 200:
+                    print(f"✈️ [Telegram]: Text & Link sent for {safe_title}")
+                else:
+                    # محاولة أخيرة كنص عادي بدون أي Markdown
+                    payload_plain = {'chat_id': TELEGRAM_CHAT_ID, 'text': caption_plain, 'disable_web_page_preview': False}
+                    async with session.post(url, json=payload_plain, timeout=15) as resp2:
+                        if resp2.status == 200:
+                            print(f"✈️ [Telegram]: Plain text sent for {safe_title}")
+                        else:
+                            err_txt = await resp2.text()
+                            print(f"❌ Telegram Send Failed ({resp2.status}): {err_txt}")
+        except Exception as e:
+            print(f"⚠️ Telegram text sending failed: {e}")
 
 # ==================== 👁️ RAW EASYOCR ENGINE ====================
 async def extract_text_from_image_url(session, image_url):
@@ -242,7 +267,8 @@ async def extract_text_from_image_url(session, image_url):
 
     full_url = urljoin("https://www.facebook.com", image_url)
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    temp_img_path = os.path.join(DOWNLOAD_DIR, f"temp_ocr_{hashlib.md5(image_url.encode()).hexdigest()[:8]}.jpg")
+    unique_filename = f"temp_ocr_{uuid.uuid4().hex}.jpg"
+    temp_img_path = os.path.join(DOWNLOAD_DIR, unique_filename)
 
     try:
         async with session.get(full_url, headers=headers, timeout=15) as resp:
@@ -278,6 +304,30 @@ async def extract_text_from_image_url(session, image_url):
 
     return ""
 
+# ==================== 🔑 FB ID EXTRACTION ====================
+def extract_facebook_post_id(url: str) -> str | None:
+    if not url:
+        return None
+    
+    pfbid_match = re.search(r'pfbid([a-zA-Z0-9]+)', url)
+    if pfbid_match:
+        return f"pfbid_{pfbid_match.group(1)}"
+
+    posts_match = re.search(r'/posts/(\d+)', url)
+    if posts_match:
+        return f"post_{posts_match.group(1)}"
+
+    fbid_match = re.search(r'(?:story_fbid=|fbid=)(\d+)', url)
+    if fbid_match:
+        return f"fbid_{fbid_match.group(1)}"
+
+    media_match = re.search(r'/(?:videos|reel|watch)\/(\d+)', url)
+    if media_match:
+        return f"media_{media_match.group(1)}"
+
+    return None
+
+# ==================== 📄 POST PARSER ====================
 async def parse_single_post(post_element, target_type, target_url, http_session):
     is_valid = await post_element.evaluate("""
         e => {
@@ -285,7 +335,7 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
             if (aria.includes('comment by') || aria.includes('reply by') || aria.includes('تعليق') || aria.includes('رد')) return false;
             let isInsideUl = e.closest('ul') !== null;
             let isComposer = e.querySelector('div[aria-label*="Write something"]') !== null || 
-                             e.querySelector('div[aria-label*="بماذا تفكر"]') !== null ||
+                             e.querySelector('div[aria-label*="بماذا تفكر"]') !== null || 
                              e.querySelector('div[aria-label*="أنشئ منشوراً"]') !== null;
             if (isInsideUl || isComposer) return false;
 
@@ -305,11 +355,13 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
     if not is_valid:
         return None, None, None, None, False
 
+    # توسيع النصوص الطويلة
     await post_element.evaluate("""
         el => {
-            const btns = Array.from(el.querySelectorAll('*'));
+            const btns = Array.from(el.querySelectorAll('div[role="button"], span[role="button"], a, span'));
             btns.forEach(b => {
-                if (b.innerText && (b.innerText === 'عرض المزيد' || b.innerText === 'See more')) {
+                let txt = (b.innerText || '').trim();
+                if (txt === 'عرض المزيد' || txt === 'See more') {
                     try { b.click(); } catch(e) {}
                 }
             });
@@ -381,39 +433,41 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
                 post_url = f"https://www.facebook.com{href}" if href.startswith('/') else href
                 break
 
+    # كشف الفيديو والبث المباشر
     has_video = await post_element.evaluate("""
-        e => e.querySelector('video') !== null || 
+        e => e.querySelector('video, [data-video-id], [aria-label*="تشغيل"], [aria-label*="Play"]') !== null || 
              e.querySelector('a[href*="/videos/"], a[href*="/reel/"], a[href*="/watch"], a[href*="/live/"]') !== null ||
-             (e.innerText && (e.innerText.includes('مباشر') || e.innerText.includes('LIVE')))
+             (e.innerText && (e.innerText.includes('مباشر') || e.innerText.includes('LIVE') || e.innerText.includes('فيديو')))
     """)
 
     lines = [line.strip() for line in clean_post_text.split('\n') if line.strip()]
     lines = [l for l in lines if not re.match(r'^(المرصد السوري|الحدث السوري|رامي عبد الرحمن|\d+\s*د|\d+\s*س|\.|\s*)$', l)]
     real_post_text = "\n".join(lines).strip()
 
-    if len(real_post_text) >= 20:
+    # تحديد النص النهائي بدقة
+    if len(real_post_text) >= 10:
         clean_post_text = real_post_text
+    elif has_video:
+        clean_post_text = real_post_text if real_post_text else "[بث مباشر / مقطع فيديو]"
     elif image_url:
         ocr_text = await extract_text_from_image_url(http_session, image_url)
-        if ocr_text:
-            clean_post_text = ocr_text
-        elif len(real_post_text) >= 5:
-            clean_post_text = real_post_text
-        else:
-            clean_post_text = "[منشور يحتوي على صورة/معاينة رابط]"
-    elif has_video:
-        clean_post_text = "[بث مباشر / مقطع فيديو]"
-    elif len(real_post_text) >= 5:
+        clean_post_text = ocr_text if ocr_text else (real_post_text if real_post_text else "[منشور يحتوي على صورة]")
+    elif len(real_post_text) >= 1:
         clean_post_text = real_post_text
     else:
-        return None, None, None, None, False
+        clean_post_text = "[منشور على فيسبوك]"
 
-    normalized_text_payload = re.sub(r'\s+', '', clean_post_text).strip().lower()
-    clean_img_key = image_url.split('?')[0] if image_url else ""
-    clean_post_key = post_url.split('?')[0] if post_url != target_url else ""
+    # استخراج معرف المنشور الثابت
+    fb_id = extract_facebook_post_id(post_url)
+    if not fb_id and image_url:
+        fb_id = extract_facebook_post_id(image_url)
 
-    unique_seed = f"{clean_post_key}|{clean_img_key}|{normalized_text_payload[:150]}"
-    post_id = hashlib.md5(unique_seed.encode('utf-8')).hexdigest()
+    if fb_id:
+        post_id = fb_id
+    else:
+        normalized_text = re.sub(r'[^ء-يa-zA-Z0-9]', '', clean_post_text).strip().lower()
+        unique_seed = f"{target_url}|{normalized_text[:120]}"
+        post_id = hashlib.md5(unique_seed.encode('utf-8')).hexdigest()
 
     return post_id, clean_post_text, post_url, image_url, has_video
 
@@ -489,7 +543,7 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
                             continue
                         
                         async with db_lock:
-                            if not await is_post_exists(post_id) and not await is_content_duplicate(text):
+                            if not await is_post_exists(post_id):
                                 await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
                                 await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
                                 saved_initial += 1
@@ -504,11 +558,10 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
                 print(f"✅ Baseline established ({saved_initial} posts) for: {page_title}")
                 return
 
-            # 🎯 الدورات التالية: التمرير حتى الاصطدام بأول منشور مسجل مسبقاً (Stop-on-Known-Post)
+            # 🎯 الدورات التالية: الفحص حتى الوصول لأول منشور مسجل مسبقاً
             seen_in_run = set()
             hit_known_post = False
 
-            # أقصى حد للتمرير 5 مرات في حال كانت هناك عدة أخبار جديدة متتالية
             for scroll_pass in range(5):
                 raw_elements = await page.query_selector_all(element_selector)
 
@@ -519,20 +572,17 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
 
                     seen_in_run.add(post_id)
 
-                    # 🔒 التحقق من قاعدة البيانات
                     async with db_lock:
-                        # إذا عثر على المنشور في Turso، يتوقف فوراً عن فحص باقي المنشورات والسكرول
-                        if await is_post_exists(post_id) or await is_content_duplicate(text):
-                            print(f"🛑 Reached already known post in [{page_title}]. Stopping scroll.")
+                        if await is_post_exists(post_id):
+                            print(f"🛑 Reached already known post [{post_id[:12]}] in [{page_title}]. Stopping scroll.")
                             hit_known_post = True
                             break
 
-                        # ✨ منشور جديد: يتم حفظه وإرساله
+                        # منشور جديد: حفظ وإرسال فوري
                         print(f"🚨 New Post Found in [{page_title}]!")
                         await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
                         await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
 
-                # إذا اصطدم بمنشور قديم مخزن مسبقاً، نخرج من حلقة السكرول فوراً
                 if hit_known_post:
                     break
 
@@ -553,6 +603,9 @@ async def main():
 
     print("🚀 Facebook Parallel Engine Started...")
     print(f"🎯 Total Targets: {len(TARGET_URLS)} | Concurrency Limit: {MAX_CONCURRENT_TASKS}")
+
+    browser = None
+    context = None
 
     try:
         async with async_playwright() as p:
@@ -591,7 +644,7 @@ async def main():
                     print(f"🏁 Cycle finished in {elapsed}s.")
 
                     if RUN_ONCE:
-                        print("🏁 RUN_ONCE=true → إنهاء التنفيذ بعد دورة واحدة (الجدولة تُدار خارجيًا).")
+                        print("🏁 RUN_ONCE=true → إنهاء التنفيذ بعد دورة واحدة.")
                         break
 
                     print(f"💤 Waiting {CHECK_INTERVAL_SECONDS}s before next cycle...\n")
@@ -599,8 +652,10 @@ async def main():
     finally:
         await close_db()
         try:
-            await context.close()
-            await browser.close()
+            if context:
+                await context.close()
+            if browser:
+                await browser.close()
         except Exception:
             pass
 
