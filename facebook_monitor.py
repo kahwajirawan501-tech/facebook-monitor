@@ -179,7 +179,7 @@ async def send_to_telegram(session, page_title, text, post_url, image_url=None, 
 
     caption = f"📢 *{page_title}*\n\n{text[:800]}\n\n"
     if has_video:
-        caption += f"🎬 [مشاهدة الفيديو على فيسبوك]({post_url})\n\n"
+        caption += f"🎬 [مشاهدة البث / الفيديو على فيسبوك]({post_url})\n\n"
     caption += f"🔗 [رابط المنشور الأصلي]({post_url})"
 
     try:
@@ -366,17 +366,24 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
         }
     """)
 
+    # تحسين استخراج الروابط لتشمل البث المباشر watch و live
     all_links = await post_element.query_selector_all('a[href]')
     post_url = target_url
     for link in all_links:
         href = await link.get_attribute('href') or ""
-        if any(keyword in href for keyword in ["/posts/", "/permalink", "pfbid", "story_fbid", "/photo", "/videos/", "/reel/", "l.facebook.com"]):
+        if any(keyword in href for keyword in [
+            "/posts/", "/permalink", "pfbid", "story_fbid", "/photo", 
+            "/videos/", "/reel/", "/watch", "/live/", "l.facebook.com"
+        ]):
             if not any(skip in href for skip in ["comment_id", "reply_comment_id", "/user/", "/friends/"]):
                 post_url = f"https://www.facebook.com{href}" if href.startswith('/') else href
                 break
 
+    # تحسين كشف الفيديو أو البث المباشر
     has_video = await post_element.evaluate("""
-        e => e.querySelector('video') !== null || e.querySelector('a[href*="/videos/"], a[href*="/reel/"]') !== null
+        e => e.querySelector('video') !== null || 
+             e.querySelector('a[href*="/videos/"], a[href*="/reel/"], a[href*="/watch"], a[href*="/live/"]') !== null ||
+             (e.innerText && (e.innerText.includes('مباشر') || e.innerText.includes('LIVE')))
     """)
 
     lines = [line.strip() for line in clean_post_text.split('\n') if line.strip()]
@@ -390,9 +397,9 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
         if ocr_text:
             clean_post_text = ocr_text
         else:
-            clean_post_text = "[منشور يحتوي على صورة/رابط بدون نص]"
+            clean_post_text = "[منشور يحتوي على صورة/معاينة رابط]"
     elif has_video:
-        clean_post_text = "[منشور يحتوي على فيديو فقط]"
+        clean_post_text = "[بث مباشر / مقطع فيديو]"
     else:
         return None, None, None, None, False
 
@@ -504,13 +511,13 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
 
                     seen_in_run.add(post_id)
 
-                    # 🛑 إذا وصل السكربت لأي منشور موجود مسبقاً في قاعدة البيانات، يتوقف السكرول فوراً
+                    # 🛑 إذا وجد منشوراً موجوداً مسبقاً، يتوقف السكرول فوراً
                     if await is_post_exists(post_id) or await is_content_duplicate(text):
                         print(f"🛑 Encountered an already processed post in [{page_title}]. Stopping scroll.")
                         hit_old_post = True
                         break
 
-                    # ✨ منشور جديد: حفظ وإرسال
+                    # ✨ منشور جديد
                     print(f"🚨 New Post Found in [{page_title}]!")
                     await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
                     await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
