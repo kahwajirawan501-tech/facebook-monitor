@@ -2,8 +2,9 @@ name: Facebook Early-Alert Monitor
 
 on:
   schedule:
-    # تشغيل الدورة بأسرع تردد متاح على خوادم GitHub
-    - cron: "* * * * *"
+    # 5 دقائق هو الحد الأدنى الفعلي الذي تنفّذه GitHub بثبات — أي رقم أقل
+    # سيُخفَّض تلقائيًا إلى 5 دقائق من جهة GitHub، مع خطر تأخير/تخطي تشغيلات.
+    - cron: "*/5 * * * *"
   workflow_dispatch: {}   # يسمح بتشغيل يدوي من تبويب Actions للاختبار
 
 # يمنع تراكم تشغيلات متوازية إذا تأخرت إحداها
@@ -14,7 +15,7 @@ concurrency:
 jobs:
   run-monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 8   # أقل من الفاصل الزمني للجدولة حتى لا تتراكم التشغيلات
+    timeout-minutes: 4   # أقل بوضوح من الفاصل الزمني (5 دقائق) حتى لا تتراكم التشغيلات أبدًا
 
     steps:
       - name: Checkout repo
@@ -29,8 +30,19 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
+      # يخزّن متصفح Chromium الخاص بـ Playwright بين التشغيلات بدل تحميله من الصفر
+      # كل مرة (كان يستغرق ~1-2 دقيقة وحده). المفتاح مرتبط بنظام التشغيل + رقم إصدار
+      # Playwright، فيتجدد تلقائيًا فقط عند تغيّر الإصدار.
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
       - name: Install Playwright Chromium
         run: playwright install --with-deps chromium
+        # إن كان الكاش موجودًا بالفعل، هذا الأمر يتحقق فقط ولا يعيد التحميل الكامل
 
       - name: Run one monitoring cycle
         env:
