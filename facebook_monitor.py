@@ -175,9 +175,8 @@ async def send_to_telegram(session, page_title, text, post_url, image_url=None, 
         print("⚠️ لم يتم ضبط Telegram Bot Token!")
         return
 
-    # تنظيف عنوان الصفحة لتفادي كسر الـ Markdown
     safe_title = re.sub(r'[*_`\[\]()]', '', page_title)
-    
+
     caption_md = f"📢 *{safe_title}*\n\n{text[:800]}\n\n"
     if has_video:
         caption_md += f"🎬 [مشاهدة البث / الفيديو على فيسبوك]({post_url})\n\n"
@@ -190,7 +189,6 @@ async def send_to_telegram(session, page_title, text, post_url, image_url=None, 
 
     sent_successfully = False
 
-    # 1. محاولة إرسال الصورة إذا وجدت
     if image_url:
         unique_filename = f"tg_{uuid.uuid4().hex}.jpg"
         temp_img_path = os.path.join(DOWNLOAD_DIR, unique_filename)
@@ -221,7 +219,6 @@ async def send_to_telegram(session, page_title, text, post_url, image_url=None, 
                             print(f"✈️ [Telegram]: Photo + Link sent for {safe_title}")
                             sent_successfully = True
                         else:
-                            # محاولة إرسال الصورة مع نص عادي بدون Markdown إذا فشل التنسيق
                             data_fallback = aiohttp.FormData()
                             data_fallback.add_field('chat_id', TELEGRAM_CHAT_ID)
                             data_fallback.add_field('caption', caption_plain)
@@ -240,7 +237,6 @@ async def send_to_telegram(session, page_title, text, post_url, image_url=None, 
                 except Exception:
                     pass
 
-    # 2. في حال عدم وجود صورة أو فشل إرسالها، الإرسال كنص حتمي
     if not sent_successfully:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -249,7 +245,6 @@ async def send_to_telegram(session, page_title, text, post_url, image_url=None, 
                 if resp.status == 200:
                     print(f"✈️ [Telegram]: Text & Link sent for {safe_title}")
                 else:
-                    # محاولة أخيرة كنص عادي بدون أي Markdown
                     payload_plain = {'chat_id': TELEGRAM_CHAT_ID, 'text': caption_plain, 'disable_web_page_preview': False}
                     async with session.post(url, json=payload_plain, timeout=15) as resp2:
                         if resp2.status == 200:
@@ -308,7 +303,7 @@ async def extract_text_from_image_url(session, image_url):
 def extract_facebook_post_id(url: str) -> str | None:
     if not url:
         return None
-    
+
     pfbid_match = re.search(r'pfbid([a-zA-Z0-9]+)', url)
     if pfbid_match:
         return f"pfbid_{pfbid_match.group(1)}"
@@ -355,7 +350,6 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
     if not is_valid:
         return None, None, None, None, False
 
-    # توسيع النصوص الطويلة
     await post_element.evaluate("""
         el => {
             const btns = Array.from(el.querySelectorAll('div[role="button"], span[role="button"], a, span'));
@@ -433,7 +427,6 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
                 post_url = f"https://www.facebook.com{href}" if href.startswith('/') else href
                 break
 
-    # كشف الفيديو والبث المباشر
     has_video = await post_element.evaluate("""
         e => e.querySelector('video, [data-video-id], [aria-label*="تشغيل"], [aria-label*="Play"]') !== null || 
              e.querySelector('a[href*="/videos/"], a[href*="/reel/"], a[href*="/watch"], a[href*="/live/"]') !== null ||
@@ -444,7 +437,6 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
     lines = [l for l in lines if not re.match(r'^(المرصد السوري|الحدث السوري|رامي عبد الرحمن|\d+\s*د|\d+\s*س|\.|\s*)$', l)]
     real_post_text = "\n".join(lines).strip()
 
-    # تحديد النص النهائي بدقة
     if len(real_post_text) >= 10:
         clean_post_text = real_post_text
     elif has_video:
@@ -455,9 +447,11 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
     elif len(real_post_text) >= 1:
         clean_post_text = real_post_text
     else:
-        clean_post_text = "[منشور على فيسبوك]"
+        # لا نص حقيقي، لا صورة، لا فيديو — هذا العنصر على الأرجح ليس منشورًا فعليًا
+        # (ودجت جانبي، إعلان، أو رابط معاينة معطّل يطلب تسجيل دخول كما في الصورة
+        # التي أرسلتها). نتجاهله تمامًا بدل إرسال رسالة فارغة عديمة الفائدة.
+        return None, None, None, None, False
 
-    # استخراج معرف المنشور الثابت
     fb_id = extract_facebook_post_id(post_url)
     if not fb_id and image_url:
         fb_id = extract_facebook_post_id(image_url)
@@ -541,7 +535,7 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
                         post_id, text, post_url, img_url, has_video = await parse_single_post(post_elem, target_type, target_url, http_session)
                         if not post_id:
                             continue
-                        
+
                         async with db_lock:
                             if not await is_post_exists(post_id):
                                 await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
@@ -558,12 +552,15 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
                 print(f"✅ Baseline established ({saved_initial} posts) for: {page_title}")
                 return
 
-            # 🎯 الدورات التالية: الفحص حتى الوصول لأول منشور مسجل مسبقاً
+            # 🎯 الدورات التالية: نمسح كل المنشورات الظاهرة في كل تمرير، ونتجاهل
+            # المعروف منها فقط دون التوقف الكامل — فيسبوك لا يضمن ترتيبًا زمنيًا
+            # صارمًا 100% (منشور مثبّت/معاد ترتيبه قد يظهر قبل منشورات أحدث فعليًا).
+            # نتوقف عن التمرير لأسفل فقط عندما لا نجد أي جديد في تمرير كامل.
             seen_in_run = set()
-            hit_known_post = False
 
             for scroll_pass in range(5):
                 raw_elements = await page.query_selector_all(element_selector)
+                found_new_this_pass = False
 
                 for post_elem in raw_elements:
                     post_id, text, post_url, img_url, has_video = await parse_single_post(post_elem, target_type, target_url, http_session)
@@ -574,16 +571,18 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
 
                     async with db_lock:
                         if await is_post_exists(post_id):
-                            print(f"🛑 Reached already known post [{post_id[:12]}] in [{page_title}]. Stopping scroll.")
-                            hit_known_post = True
-                            break
+                            # منشور معروف مسبقًا — نتجاهله فقط ونكمل فحص بقية
+                            # المنشورات الظاهرة، لا نوقف كل شيء.
+                            continue
 
-                        # منشور جديد: حفظ وإرسال فوري
                         print(f"🚨 New Post Found in [{page_title}]!")
+                        found_new_this_pass = True
                         await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
-                        await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
 
-                if hit_known_post:
+                    await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
+
+                if not found_new_this_pass:
+                    # لا شيء جديد في هذا التمرير الكامل — لا داعي للتمرير لأسفل أكثر.
                     break
 
                 await page.keyboard.press("PageDown")
