@@ -169,7 +169,7 @@ async def save_post_to_db(post_id, text, post_url, image_url, video_url, target_
     )
     print(f"💾 Saved [{post_id[:12]}] to Turso!")
 
-# ==================== ✈️ ASYNC TELEGRAM BOT CLIENT (مع معالجة Fallback) ====================
+# ==================== ✈️ ASYNC TELEGRAM BOT CLIENT ====================
 async def send_to_telegram(session, page_title, text, post_url, image_url=None, has_video=False):
     if not TELEGRAM_BOT_TOKEN:
         print("⚠️ لم يتم ضبط Telegram Bot Token!")
@@ -447,9 +447,6 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
     elif len(real_post_text) >= 1:
         clean_post_text = real_post_text
     else:
-        # لا نص حقيقي، لا صورة، لا فيديو — هذا العنصر على الأرجح ليس منشورًا فعليًا
-        # (ودجت جانبي، إعلان، أو رابط معاينة معطّل يطلب تسجيل دخول كما في الصورة
-        # التي أرسلتها). نتجاهله تمامًا بدل إرسال رسالة فارغة عديمة الفائدة.
         return None, None, None, None, False
 
     fb_id = extract_facebook_post_id(post_url)
@@ -486,7 +483,7 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
         try:
             print(f"🔄 [Start Check]: {target_url}")
             await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
-            await page.wait_for_timeout(4000)
+            await page.wait_for_timeout(5000) # مهلة لضمان تحميل الصفحة
 
             close_selectors = [
                 'div[role="dialog"] div[aria-label="إغلاق"]', 
@@ -499,7 +496,7 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
                     btn = await page.query_selector(sel)
                     if btn:
                         await btn.click()
-                        await page.wait_for_timeout(500)
+                        await page.wait_for_timeout(1000)
                 except Exception:
                     pass
 
@@ -526,7 +523,7 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
 
             element_selector = 'div[role="feed"] > div, div[role="article"], div[data-pagelet*="FeedUnit"]'
 
-            # 🎯 الدورة الأولى: تأسيس الحد المرجعي (Baseline)
+            # 🎯 الدورة الأولى: تأسيس الحد المرجعي (إحضار منشورين فقط كما طلبت)
             if first_run:
                 saved_initial = 0
                 for _ in range(3):
@@ -542,28 +539,29 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
                                 await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
                                 saved_initial += 1
 
+                        # التوقف الفوري بمجرد جلب منشورين
                         if saved_initial >= 2:
                             break
+                    
                     if saved_initial >= 2:
                         break
+
                     await page.keyboard.press("PageDown")
-                    await page.wait_for_timeout(2000)
+                    await page.wait_for_timeout(3000)
 
                 print(f"✅ Baseline established ({saved_initial} posts) for: {page_title}")
                 return
 
-            # 🎯 الدورات التالية: نمسح كل المنشورات الظاهرة في كل تمرير، ونتجاهل
-            # المعروف منها فقط دون التوقف الكامل — فيسبوك لا يضمن ترتيبًا زمنيًا
-            # صارمًا 100% (منشور مثبّت/معاد ترتيبه قد يظهر قبل منشورات أحدث فعليًا).
-            # نتوقف عن التمرير لأسفل فقط عندما لا نجد أي جديد في تمرير كامل.
+            # 🎯 الدورات التالية: التمرير المستمر لعدم تفويت أي منشور جديد
             seen_in_run = set()
 
+            # نجبر السكربت على فحص 5 تمريرات كاملة ليتجاوز المنشورات المثبتة أو الترتيب العشوائي
             for scroll_pass in range(5):
                 raw_elements = await page.query_selector_all(element_selector)
-                found_new_this_pass = False
 
                 for post_elem in raw_elements:
                     post_id, text, post_url, img_url, has_video = await parse_single_post(post_elem, target_type, target_url, http_session)
+                    
                     if not post_id or post_id in seen_in_run:
                         continue
 
@@ -571,22 +569,15 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
 
                     async with db_lock:
                         if await is_post_exists(post_id):
-                            # منشور معروف مسبقًا — نتجاهله فقط ونكمل فحص بقية
-                            # المنشورات الظاهرة، لا نوقف كل شيء.
-                            continue
+                            continue # إذا وجدنا منشور قديم، نتجاهله فقط ولا نوقف الفحص
 
                         print(f"🚨 New Post Found in [{page_title}]!")
-                        found_new_this_pass = True
                         await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
 
                     await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
 
-                if not found_new_this_pass:
-                    # لا شيء جديد في هذا التمرير الكامل — لا داعي للتمرير لأسفل أكثر.
-                    break
-
                 await page.keyboard.press("PageDown")
-                await page.wait_for_timeout(2000)
+                await page.wait_for_timeout(3000) # وقت كافي ليظهر المحتوى الجديد
 
         except Exception as e:
             print(f"❌ Error while monitoring {target_url}: {e}")
