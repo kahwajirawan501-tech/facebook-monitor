@@ -6,7 +6,7 @@ import uuid
 import asyncio
 import hashlib
 import warnings
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urlparse, urljoin
 
 import aiohttp
@@ -159,6 +159,30 @@ async def is_db_empty_for_target(target_url):
 async def is_post_exists(post_id):
     rows = await _turso_execute('SELECT 1 FROM posts WHERE id = ?', [post_id])
     return len(rows) > 0
+
+async def is_recent_content_duplicate(target_url, clean_text, hours=24, prefix_len=60):
+    """شبكة أمان إضافية: تفحص هل نفس النص (تقريبًا) نُشر لنفس الصفحة خلال آخر
+    عدة ساعات، حتى لو اختلف post_id (مثلاً بسبب تغيّر رمز pfbid بين جلستين
+    مختلفتين لنفس المنشور الحقيقي على فيسبوك). المقارنة على أول 60 حرفًا فقط
+    (موحّدة بلا مسافات) لتحمّل اختلافات طفيفة في القراءة."""
+    if not clean_text:
+        return False
+    threshold = (datetime.now() - timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S')
+    rows = await _turso_execute(
+        'SELECT text FROM posts WHERE target_url = ? AND created_at >= ?',
+        [target_url, threshold]
+    )
+    normalized_new = re.sub(r'\s+', '', clean_text).strip().lower()[:prefix_len]
+    if not normalized_new:
+        return False
+    for row in rows:
+        existing_text = row[0]
+        if not existing_text:
+            continue
+        normalized_existing = re.sub(r'\s+', '', existing_text).strip().lower()[:prefix_len]
+        if normalized_existing and normalized_existing == normalized_new:
+            return True
+    return False
 
 async def save_post_to_db(post_id, text, post_url, image_url, video_url, target_type, target_url):
     await _turso_execute(
@@ -626,6 +650,7 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
                         continue
 
                     seen_in_run.add(post_id)
+                    is_new = False
 
                     async with db_lock:
                         if await is_post_exists(post_id):
@@ -633,11 +658,22 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
                             # المنشورات الظاهرة، لا نوقف كل شيء.
                             continue
 
+                        if await is_recent_content_duplicate(target_url, text):
+                            # نفس المحتوى تقريبًا نُشر لنفس الصفحة خلال آخر 24 ساعة
+                            # بمعرّف مختلف (غالبًا بسبب تغيّر رمز pfbid بين جلستين
+                            # مختلفتين لنفس المنشور). نحفظه بمعرّفه الجديد لمنع
+                            # إعادة معالجته لاحقًا، لكن لا نرسله لتيليجرام لتفادي التكرار.
+                            print(f"🔁 Skipping likely duplicate content (recent match) in [{page_title}].")
+                            await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
+                            continue
+
                         print(f"🚨 New Post Found in [{page_title}]!")
                         found_new_this_pass = True
+                        is_new = True
                         await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
 
-                    await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
+                    if is_new:
+                        await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
 
                 if not found_new_this_pass:
                     # لا شيء جديد في هذا التمرير الكامل — لا داعي للتمرير لأسفل أكثر.
