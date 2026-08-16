@@ -47,6 +47,7 @@ jobs:
       - name: Run one monitoring cycle
         env:
           RUN_ONCE: "true"
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TARGET_URLS: ${{ secrets.TARGET_URLS }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
