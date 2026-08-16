@@ -169,7 +169,7 @@ async def save_post_to_db(post_id, text, post_url, image_url, video_url, target_
     )
     print(f"💾 Saved [{post_id[:12]}] to Turso!")
 
-# ==================== ✈️ ASYNC TELEGRAM BOT CLIENT ====================
+# ==================== ✈️ ASYNC TELEGRAM BOT CLIENT (مع معالجة Fallback) ====================
 async def send_to_telegram(session, page_title, text, post_url, image_url=None, has_video=False):
     if not TELEGRAM_BOT_TOKEN:
         print("⚠️ لم يتم ضبط Telegram Bot Token!")
@@ -256,6 +256,51 @@ async def send_to_telegram(session, page_title, text, post_url, image_url=None, 
             print(f"⚠️ Telegram text sending failed: {e}")
 
 # ==================== 👁️ RAW EASYOCR ENGINE ====================
+def _preprocess_image_for_ocr(image_path: str) -> str:
+    """يحسّن الصورة قبل تمريرها للـ OCR: تكبير + تدرج رمادي + زيادة تباين وحدّة.
+    هذا يرفع دقة القراءة بشكل ملحوظ خصوصًا في بطاقات الأخبار ذات التباين الضعيف
+    (خلفيات بيضاء/فاترة كما في بطاقات المرصد السوري)."""
+    from PIL import ImageEnhance, ImageOps
+
+    img = Image.open(image_path).convert("RGB")
+
+    # تكبير الصورة إن كانت صغيرة نسبيًا (يساعد الـ OCR على تمييز الحروف الدقيقة)
+    max_dim = max(img.size)
+    if max_dim < 1600:
+        scale = 1600 / max_dim
+        img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
+
+    gray = ImageOps.grayscale(img)
+    gray = ImageEnhance.Contrast(gray).enhance(1.6)
+    gray = ImageEnhance.Sharpness(gray).enhance(2.0)
+
+    processed_path = image_path.replace(".jpg", "_proc.jpg")
+    gray.save(processed_path, quality=95)
+    return processed_path
+
+
+def _clean_ocr_text(raw_lines: list[str]) -> str:
+    """يتجاهل الأسطر التي تبدو رموزًا مشوّشة (زخارف/شعارات صغيرة أُسيء قراءتها)
+    بدل تمريرها كما هي. المعيار: سطر قصير جدًا بلا حروف عربية وبأحرف لاتينية
+    غير منتظمة (خلط كبير/صغير غريب) يُعامل كضجيج ويُستبعد."""
+    import re as _re
+    clean_lines = []
+    for line in raw_lines:
+        line = line.strip()
+        if not line:
+            continue
+        has_arabic = bool(_re.search(r'[ء-ي]', line))
+        if has_arabic:
+            clean_lines.append(line)
+            continue
+        # سطر لاتيني/رقمي: نقبله فقط إن بدا كنص حقيقي (كلمات معقولة الطول، بلا
+        # خلط أحرف كبيرة/صغيرة عشوائي مثل "UUuman RightقR")
+        looks_garbled = bool(_re.search(r'[a-z][A-Z][a-z]*[A-Z]', line)) or len(line) <= 2
+        if not looks_garbled:
+            clean_lines.append(line)
+    return "\n".join(clean_lines)
+
+
 async def extract_text_from_image_url(session, image_url):
     if not image_url:
         return ""
@@ -264,6 +309,7 @@ async def extract_text_from_image_url(session, image_url):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     unique_filename = f"temp_ocr_{uuid.uuid4().hex}.jpg"
     temp_img_path = os.path.join(DOWNLOAD_DIR, unique_filename)
+    processed_path = None
 
     try:
         async with session.get(full_url, headers=headers, timeout=15) as resp:
@@ -273,29 +319,41 @@ async def extract_text_from_image_url(session, image_url):
                 async with aiofiles.open(temp_img_path, 'wb') as f:
                     await f.write(img_bytes)
 
+                try:
+                    processed_path = await asyncio.to_thread(_preprocess_image_for_ocr, temp_img_path)
+                    ocr_input_path = processed_path
+                except Exception as prep_err:
+                    print(f"⚠️ Image preprocessing failed ({prep_err}), using original image.")
+                    ocr_input_path = temp_img_path
+
                 results = await asyncio.to_thread(
                     ocr_reader.readtext,
-                    temp_img_path,
+                    ocr_input_path,
                     detail=0,
-                    paragraph=True
+                    paragraph=True,
+                    mag_ratio=1.5,
+                    contrast_ths=0.1,
+                    adjust_contrast=0.5,
                 )
 
-                if os.path.exists(temp_img_path):
-                    try:
-                        os.remove(temp_img_path)
-                    except Exception:
-                        pass
+                for p in (temp_img_path, processed_path):
+                    if p and os.path.exists(p):
+                        try:
+                            os.remove(p)
+                        except Exception:
+                            pass
 
-                extracted_text = "\n".join(results).strip()
+                extracted_text = _clean_ocr_text(results)
                 if extracted_text:
                     return extracted_text
     except Exception as e:
         print(f"⚠️ OCR error: {e}")
-        if os.path.exists(temp_img_path):
-            try:
-                os.remove(temp_img_path)
-            except Exception:
-                pass
+        for p in (temp_img_path, processed_path):
+            if p and os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
 
     return ""
 
@@ -447,6 +505,9 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
     elif len(real_post_text) >= 1:
         clean_post_text = real_post_text
     else:
+        # لا نص حقيقي، لا صورة، لا فيديو — هذا العنصر على الأرجح ليس منشورًا فعليًا
+        # (ودجت جانبي، إعلان، أو رابط معاينة معطّل يطلب تسجيل دخول كما في الصورة
+        # التي أرسلتها). نتجاهله تمامًا بدل إرسال رسالة فارغة عديمة الفائدة.
         return None, None, None, None, False
 
     fb_id = extract_facebook_post_id(post_url)
@@ -483,7 +544,7 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
         try:
             print(f"🔄 [Start Check]: {target_url}")
             await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
-            await page.wait_for_timeout(5000) # مهلة لضمان تحميل الصفحة
+            await page.wait_for_timeout(4000)
 
             close_selectors = [
                 'div[role="dialog"] div[aria-label="إغلاق"]', 
@@ -496,7 +557,7 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
                     btn = await page.query_selector(sel)
                     if btn:
                         await btn.click()
-                        await page.wait_for_timeout(1000)
+                        await page.wait_for_timeout(500)
                 except Exception:
                     pass
 
@@ -523,7 +584,7 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
 
             element_selector = 'div[role="feed"] > div, div[role="article"], div[data-pagelet*="FeedUnit"]'
 
-            # 🎯 الدورة الأولى: تأسيس الحد المرجعي (إحضار منشورين فقط كما طلبت)
+            # 🎯 الدورة الأولى: تأسيس الحد المرجعي (Baseline)
             if first_run:
                 saved_initial = 0
                 for _ in range(3):
@@ -539,29 +600,28 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
                                 await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
                                 saved_initial += 1
 
-                        # التوقف الفوري بمجرد جلب منشورين
                         if saved_initial >= 2:
                             break
-                    
                     if saved_initial >= 2:
                         break
-
                     await page.keyboard.press("PageDown")
-                    await page.wait_for_timeout(3000)
+                    await page.wait_for_timeout(2000)
 
                 print(f"✅ Baseline established ({saved_initial} posts) for: {page_title}")
                 return
 
-            # 🎯 الدورات التالية: التمرير المستمر لعدم تفويت أي منشور جديد
+            # 🎯 الدورات التالية: نمسح كل المنشورات الظاهرة في كل تمرير، ونتجاهل
+            # المعروف منها فقط دون التوقف الكامل — فيسبوك لا يضمن ترتيبًا زمنيًا
+            # صارمًا 100% (منشور مثبّت/معاد ترتيبه قد يظهر قبل منشورات أحدث فعليًا).
+            # نتوقف عن التمرير لأسفل فقط عندما لا نجد أي جديد في تمرير كامل.
             seen_in_run = set()
 
-            # نجبر السكربت على فحص 5 تمريرات كاملة ليتجاوز المنشورات المثبتة أو الترتيب العشوائي
             for scroll_pass in range(5):
                 raw_elements = await page.query_selector_all(element_selector)
+                found_new_this_pass = False
 
                 for post_elem in raw_elements:
                     post_id, text, post_url, img_url, has_video = await parse_single_post(post_elem, target_type, target_url, http_session)
-                    
                     if not post_id or post_id in seen_in_run:
                         continue
 
@@ -569,15 +629,22 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
 
                     async with db_lock:
                         if await is_post_exists(post_id):
-                            continue # إذا وجدنا منشور قديم، نتجاهله فقط ولا نوقف الفحص
+                            # منشور معروف مسبقًا — نتجاهله فقط ونكمل فحص بقية
+                            # المنشورات الظاهرة، لا نوقف كل شيء.
+                            continue
 
                         print(f"🚨 New Post Found in [{page_title}]!")
+                        found_new_this_pass = True
                         await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
 
                     await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
 
+                if not found_new_this_pass:
+                    # لا شيء جديد في هذا التمرير الكامل — لا داعي للتمرير لأسفل أكثر.
+                    break
+
                 await page.keyboard.press("PageDown")
-                await page.wait_for_timeout(3000) # وقت كافي ليظهر المحتوى الجديد
+                await page.wait_for_timeout(2000)
 
         except Exception as e:
             print(f"❌ Error while monitoring {target_url}: {e}")
