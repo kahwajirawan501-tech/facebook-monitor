@@ -13,8 +13,8 @@ import aiohttp
 import aiofiles
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright
-import easyocr
 from PIL import Image
+from google import genai
 
 # ==================== 🔕 SUPPRESS WARNINGS ====================
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -39,6 +39,8 @@ TELEGRAM_CHAT_ID = _get_env("TELEGRAM_CHAT_ID")
 TURSO_DATABASE_URL = _get_env("TURSO_DATABASE_URL")
 TURSO_AUTH_TOKEN = _get_env("TURSO_AUTH_TOKEN")
 
+GEMINI_API_KEY = _get_env("GEMINI_API_KEY")
+
 MAX_CONCURRENT_TASKS = int(_get_env("MAX_CONCURRENT_TASKS", required=False, default="3"))
 CHECK_INTERVAL_SECONDS = int(_get_env("CHECK_INTERVAL_SECONDS", required=False, default="120"))
 RUN_ONCE = _get_env("RUN_ONCE", required=False, default="false").lower() in ("1", "true", "yes")
@@ -52,9 +54,9 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 # قفل لمنع تضارب الكتابة في قاعدة البيانات
 db_lock: asyncio.Lock | None = None
 
-# ==================== 👁️ OCR ENGINE ====================
-print("⏳ Initializing EasyOCR Engine for Arabic & English text extraction...")
-ocr_reader = easyocr.Reader(['ar', 'en'], gpu=False, verbose=False)
+# ==================== 🧠 GEMINI AI CLIENT ====================
+print("⏳ Initializing Google GenAI Client for Vision OCR...")
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # ==================== 🗄️ TURSO DATABASE LAYER ====================
 db_session: aiohttp.ClientSession | None = None
@@ -161,10 +163,6 @@ async def is_post_exists(post_id):
     return len(rows) > 0
 
 async def is_recent_content_duplicate(target_url, clean_text, hours=24, prefix_len=60):
-    """شبكة أمان إضافية: تفحص هل نفس النص (تقريبًا) نُشر لنفس الصفحة خلال آخر
-    عدة ساعات، حتى لو اختلف post_id (مثلاً بسبب تغيّر رمز pfbid بين جلستين
-    مختلفتين لنفس المنشور الحقيقي على فيسبوك). المقارنة على أول 60 حرفًا فقط
-    (موحّدة بلا مسافات) لتحمّل اختلافات طفيفة في القراءة."""
     if not clean_text:
         return False
     threshold = (datetime.now() - timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S')
@@ -187,13 +185,13 @@ async def is_recent_content_duplicate(target_url, clean_text, hours=24, prefix_l
 async def save_post_to_db(post_id, text, post_url, image_url, video_url, target_type, target_url):
     await _turso_execute(
         '''INSERT INTO posts (id, text, post_url, image_url, video_url, target_type, target_url, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
         [post_id, text, post_url, image_url, video_url, target_type, target_url,
          datetime.now().strftime('%Y-%m-%d %H:%M:%S')]
     )
     print(f"💾 Saved [{post_id[:12]}] to Turso!")
 
-# ==================== ✈️ ASYNC TELEGRAM BOT CLIENT (مع معالجة Fallback) ====================
+# ==================== ✈️ ASYNC TELEGRAM BOT CLIENT ====================
 async def send_to_telegram(session, page_title, text, post_url, image_url=None, has_video=False):
     if not TELEGRAM_BOT_TOKEN:
         print("⚠️ لم يتم ضبط Telegram Bot Token!")
@@ -273,111 +271,63 @@ async def send_to_telegram(session, page_title, text, post_url, image_url=None, 
                     async with session.post(url, json=payload_plain, timeout=15) as resp2:
                         if resp2.status == 200:
                             print(f"✈️ [Telegram]: Plain text sent for {safe_title}")
-                        else:
-                            err_txt = await resp2.text()
-                            print(f"❌ Telegram Send Failed ({resp2.status}): {err_txt}")
         except Exception as e:
             print(f"⚠️ Telegram text sending failed: {e}")
 
-# ==================== 👁️ RAW EASYOCR ENGINE ====================
-def _preprocess_image_for_ocr(image_path: str) -> str:
-    """يحسّن الصورة قبل تمريرها للـ OCR: تكبير + تدرج رمادي + زيادة تباين وحدّة.
-    هذا يرفع دقة القراءة بشكل ملحوظ خصوصًا في بطاقات الأخبار ذات التباين الضعيف
-    (خلفيات بيضاء/فاترة كما في بطاقات المرصد السوري)."""
-    from PIL import ImageEnhance, ImageOps
-
-    img = Image.open(image_path).convert("RGB")
-
-    # تكبير الصورة إن كانت صغيرة نسبيًا (يساعد الـ OCR على تمييز الحروف الدقيقة)
-    max_dim = max(img.size)
-    if max_dim < 1600:
-        scale = 1600 / max_dim
-        img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
-
-    gray = ImageOps.grayscale(img)
-    gray = ImageEnhance.Contrast(gray).enhance(1.6)
-    gray = ImageEnhance.Sharpness(gray).enhance(2.0)
-
-    processed_path = image_path.replace(".jpg", "_proc.jpg")
-    gray.save(processed_path, quality=95)
-    return processed_path
-
-
-def _clean_ocr_text(raw_lines: list[str]) -> str:
-    """يتجاهل الأسطر التي تبدو رموزًا مشوّشة (زخارف/شعارات صغيرة أُسيء قراءتها)
-    بدل تمريرها كما هي. المعيار: سطر قصير جدًا بلا حروف عربية وبأحرف لاتينية
-    غير منتظمة (خلط كبير/صغير غريب) يُعامل كضجيج ويُستبعد."""
-    import re as _re
-    clean_lines = []
-    for line in raw_lines:
-        line = line.strip()
-        if not line:
-            continue
-        has_arabic = bool(_re.search(r'[ء-ي]', line))
-        if has_arabic:
-            clean_lines.append(line)
-            continue
-        # سطر لاتيني/رقمي: نقبله فقط إن بدا كنص حقيقي (كلمات معقولة الطول، بلا
-        # خلط أحرف كبيرة/صغيرة عشوائي مثل "UUuman RightقR")
-        looks_garbled = bool(_re.search(r'[a-z][A-Z][a-z]*[A-Z]', line)) or len(line) <= 2
-        if not looks_garbled:
-            clean_lines.append(line)
-    return "\n".join(clean_lines)
-
-
+# ==================== 👁️ GEMINI VISION OCR ENGINE ====================
 async def extract_text_from_image_url(session, image_url):
     if not image_url:
         return ""
 
     full_url = urljoin("https://www.facebook.com", image_url)
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    unique_filename = f"temp_ocr_{uuid.uuid4().hex}.jpg"
+    unique_filename = f"gemini_ocr_{uuid.uuid4().hex}.jpg"
     temp_img_path = os.path.join(DOWNLOAD_DIR, unique_filename)
-    processed_path = None
 
     try:
         async with session.get(full_url, headers=headers, timeout=15) as resp:
             if resp.status == 200:
                 img_bytes = await resp.read()
-
                 async with aiofiles.open(temp_img_path, 'wb') as f:
                     await f.write(img_bytes)
 
-                try:
-                    processed_path = await asyncio.to_thread(_preprocess_image_for_ocr, temp_img_path)
-                    ocr_input_path = processed_path
-                except Exception as prep_err:
-                    print(f"⚠️ Image preprocessing failed ({prep_err}), using original image.")
-                    ocr_input_path = temp_img_path
+                # فتح الصورة باستخدام Pillow
+                img = await asyncio.to_thread(Image.open, temp_img_path)
 
-                results = await asyncio.to_thread(
-                    ocr_reader.readtext,
-                    ocr_input_path,
-                    detail=0,
-                    paragraph=True,
-                    mag_ratio=1.5,
-                    contrast_ths=0.1,
-                    adjust_contrast=0.5,
-                )
+                prompt = """
+                أنت خبير في استخراج النصوص (OCR) من الصور بدقة متناهية.
+                قم باستخراج النص العربي الموجود في هذه الصورة.
+                التعليمات:
+                1. استخرج النص كما هو تماماً، وحافظ على تنسيق الفقرات والأسطر.
+                2. السياق العام للنص يتعلق بالأخبار والأحداث الميدانية والسياسية. استخدم هذا السياق لتصحيح أي كلمات مشوهة بصرياً.
+                3. أعد النص المستخرج فقط. لا تضف أي مقدمات، شروحات، أو علامات تنسيق مثل (```text).
+                """
 
-                for p in (temp_img_path, processed_path):
-                    if p and os.path.exists(p):
-                        try:
-                            os.remove(p)
-                        except Exception:
-                            pass
+                # استدعاء نموذج Gemini Vision بشكل غير متزامن
+                def call_gemini():
+                    response = gemini_client.models.generate_content(
+                        model='gemini-3-flash-preview',
+                        contents=[prompt, img]
+                    )
+                    return response.text.strip()
 
-                extracted_text = _clean_ocr_text(results)
-                if extracted_text:
-                    return extracted_text
+                extracted_text = await asyncio.to_thread(call_gemini)
+
+                if os.path.exists(temp_img_path):
+                    try:
+                        os.remove(temp_img_path)
+                    except Exception:
+                        pass
+
+                return extracted_text
+
     except Exception as e:
-        print(f"⚠️ OCR error: {e}")
-        for p in (temp_img_path, processed_path):
-            if p and os.path.exists(p):
-                try:
-                    os.remove(p)
-                except Exception:
-                    pass
+        print(f"⚠️ Gemini Vision OCR error: {e}")
+        if os.path.exists(temp_img_path):
+            try:
+                os.remove(temp_img_path)
+            except Exception:
+                pass
 
     return ""
 
@@ -412,8 +362,8 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
             if (aria.includes('comment by') || aria.includes('reply by') || aria.includes('تعليق') || aria.includes('رد')) return false;
             let isInsideUl = e.closest('ul') !== null;
             let isComposer = e.querySelector('div[aria-label*="Write something"]') !== null || 
-                             e.querySelector('div[aria-label*="بماذا تفكر"]') !== null || 
-                             e.querySelector('div[aria-label*="أنشئ منشوراً"]') !== null;
+                           e.querySelector('div[aria-label*="بماذا تفكر"]') !== null || 
+                           e.querySelector('div[aria-label*="أنشئ منشوراً"]') !== null;
             if (isInsideUl || isComposer) return false;
 
             let innerText = e.innerText || '';
@@ -506,7 +456,7 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
             "/videos/", "/reel/", "/watch", "/live/", "l.facebook.com"
         ]):
             if not any(skip in href for skip in ["comment_id", "reply_comment_id", "/user/", "/friends/"]):
-                post_url = f"https://www.facebook.com{href}" if href.startswith('/') else href
+                post_url = f"[https://www.facebook.com](https://www.facebook.com){href}" if href.startswith('/') else href
                 break
 
     has_video = await post_element.evaluate("""
@@ -529,9 +479,6 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
     elif len(real_post_text) >= 1:
         clean_post_text = real_post_text
     else:
-        # لا نص حقيقي، لا صورة، لا فيديو — هذا العنصر على الأرجح ليس منشورًا فعليًا
-        # (ودجت جانبي، إعلان، أو رابط معاينة معطّل يطلب تسجيل دخول كما في الصورة
-        # التي أرسلتها). نتجاهله تمامًا بدل إرسال رسالة فارغة عديمة الفائدة.
         return None, None, None, None, False
 
     fb_id = extract_facebook_post_id(post_url)
@@ -608,7 +555,6 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
 
             element_selector = 'div[role="feed"] > div, div[role="article"], div[data-pagelet*="FeedUnit"]'
 
-            # 🎯 الدورة الأولى: تأسيس الحد المرجعي (Baseline)
             if first_run:
                 saved_initial = 0
                 for _ in range(3):
@@ -634,10 +580,6 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
                 print(f"✅ Baseline established ({saved_initial} posts) for: {page_title}")
                 return
 
-            # 🎯 الدورات التالية: نمسح كل المنشورات الظاهرة في كل تمرير، ونتجاهل
-            # المعروف منها فقط دون التوقف الكامل — فيسبوك لا يضمن ترتيبًا زمنيًا
-            # صارمًا 100% (منشور مثبّت/معاد ترتيبه قد يظهر قبل منشورات أحدث فعليًا).
-            # نتوقف عن التمرير لأسفل فقط عندما لا نجد أي جديد في تمرير كامل.
             seen_in_run = set()
 
             for scroll_pass in range(5):
@@ -654,15 +596,9 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
 
                     async with db_lock:
                         if await is_post_exists(post_id):
-                            # منشور معروف مسبقًا — نتجاهله فقط ونكمل فحص بقية
-                            # المنشورات الظاهرة، لا نوقف كل شيء.
                             continue
 
                         if await is_recent_content_duplicate(target_url, text):
-                            # نفس المحتوى تقريبًا نُشر لنفس الصفحة خلال آخر 24 ساعة
-                            # بمعرّف مختلف (غالبًا بسبب تغيّر رمز pfbid بين جلستين
-                            # مختلفتين لنفس المنشور). نحفظه بمعرّفه الجديد لمنع
-                            # إعادة معالجته لاحقًا، لكن لا نرسله لتيليجرام لتفادي التكرار.
                             print(f"🔁 Skipping likely duplicate content (recent match) in [{page_title}].")
                             await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
                             continue
@@ -676,7 +612,6 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
                         await send_to_telegram(http_session, page_title, text, post_url, img_url, has_video)
 
                 if not found_new_this_pass:
-                    # لا شيء جديد في هذا التمرير الكامل — لا داعي للتمرير لأسفل أكثر.
                     break
 
                 await page.keyboard.press("PageDown")
