@@ -1,7 +1,6 @@
 aiohttp
 aiofiles
 playwright
-easyocr
+google-genai
 Pillow
 python-dotenv
- 
