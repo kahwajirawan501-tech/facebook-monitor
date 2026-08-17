@@ -304,7 +304,7 @@ async def extract_text_from_image_url(session, image_url):
 
                 def call_gemini():
                     response = gemini_client.models.generate_content(
-                        model='gemini-3-flash-preview',
+                        model='gemini-2.5-flash',
                         contents=[prompt, img]
                     )
                     return response.text.strip()
@@ -467,17 +467,28 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
     lines = [l for l in lines if not re.match(r'^(المرصد السوري|الحدث السوري|رامي عبد الرحمن|\d+\s*د|\d+\s*س|\.|\s*)$', l)]
     real_post_text = "\n".join(lines).strip()
 
-    # 🧠 التحقق الذكي: إذا كان النص عبارة عن رابط موقع فقط أو قصير جداً
     is_only_link = bool(real_post_text.startswith("http") or "http" in real_post_text) and len(real_post_text) < 120
 
-    if len(real_post_text) >= 15 and not is_only_link:
+    # 🛠️ التحقق مما إذا كان النص عبارة عن هاشتاقات فقط أو رموز قصيرة
+    is_mostly_hashtags = False
+    if real_post_text:
+        post_lines = [l.strip() for l in real_post_text.split('\n') if l.strip()]
+        hashtag_lines = sum(1 for l in post_lines if l.startswith('#') or l in ['.', '-', '...'])
+        if len(post_lines) > 0 and (hashtag_lines / len(post_lines) >= 0.5 or len(real_post_text) < 25):
+            is_mostly_hashtags = True
+
+    # المنطق المحدث لضمان قراءة الصورة بالـ OCR عند غياب الخبر النصي أو وجود هاشتاقات
+    if image_url and (is_mostly_hashtags or not real_post_text or is_only_link):
+        print(f"👁️ النص في المنشور عبارة عن هاشتاقات/روابط فقط، جاري قراءة تفاصيل الخبر من الصورة عبر Gemini Vision...")
+        ocr_text = await extract_text_from_image_url(http_session, image_url)
+        clean_post_text = ocr_text if ocr_text else (real_post_text if real_post_text else "[منشور يحتوي على صورة]")
+    elif len(real_post_text) >= 15 and not is_only_link:
         clean_post_text = real_post_text
     elif has_video:
         clean_post_text = real_post_text if real_post_text and not is_only_link else "[بث مباشر / مقطع فيديو]"
     elif image_url:
-        print(f"👁️ النص في المنشور عبارة عن رابط، جاري قراءة تفاصيل الخبر من الصورة عبر Gemini Vision...")
         ocr_text = await extract_text_from_image_url(http_session, image_url)
-        clean_post_text = ocr_text if ocr_text else (real_post_text if real_post_text else "[منشور يحتوي على صورة]")
+        clean_post_text = ocr_text if ocr_text else real_post_text
     elif len(real_post_text) >= 1:
         clean_post_text = real_post_text
     else:
