@@ -192,6 +192,7 @@ async def save_post_to_db(post_id, text, post_url, image_url, video_url, target_
     print(f"💾 Saved [{post_id[:12]}] to Turso!")
 
 # ==================== ✈️ ASYNC TELEGRAM BOT CLIENT ====================
+# ==================== ✈️ ASYNC TELEGRAM BOT CLIENT ====================
 async def send_to_telegram(session, page_title, text, post_url, image_url=None, has_video=False):
     if not TELEGRAM_BOT_TOKEN:
         print("⚠️ لم يتم ضبط Telegram Bot Token!")
@@ -199,15 +200,12 @@ async def send_to_telegram(session, page_title, text, post_url, image_url=None, 
 
     safe_title = re.sub(r'[*_`\[\]()]', '', page_title)
 
-    caption_md = f"📢 *{safe_title}*\n\n{text[:800]}\n\n"
+    # روابط ظاهرة كنص عادي مباشرةً (بدون Markdown hyperlink) — لا حاجة لأي
+    # parse_mode بعد الآن لأن الرسالة كلها نص عادي.
+    caption = f"📢 {safe_title}\n\n{text[:800]}\n\n"
     if has_video:
-        caption_md += f"🎬 [مشاهدة البث / الفيديو على فيسبوك]({post_url})\n\n"
-    caption_md += f"🔗 [رابط المنشور الأصلي]({post_url})"
-
-    caption_plain = f"📢 {safe_title}\n\n{text[:800]}\n\n"
-    if has_video:
-        caption_plain += f"🎬 رابط الفيديو: {post_url}\n\n"
-    caption_plain += f"🔗 رابط المنشور: {post_url}"
+        caption += f"🎬 رابط الفيديو: {post_url}\n\n"
+    caption += f"🔗 رابط المنشور: {post_url}"
 
     sent_successfully = False
 
@@ -232,8 +230,7 @@ async def send_to_telegram(session, page_title, text, post_url, image_url=None, 
 
                     data = aiohttp.FormData()
                     data.add_field('chat_id', TELEGRAM_CHAT_ID)
-                    data.add_field('caption', caption_md)
-                    data.add_field('parse_mode', 'Markdown')
+                    data.add_field('caption', caption)
                     data.add_field('photo', photo_data, filename="image.jpg")
 
                     async with session.post(url, data=data, timeout=20) as resp:
@@ -241,14 +238,8 @@ async def send_to_telegram(session, page_title, text, post_url, image_url=None, 
                             print(f"✈️ [Telegram]: Photo + Link sent for {safe_title}")
                             sent_successfully = True
                         else:
-                            data_fallback = aiohttp.FormData()
-                            data_fallback.add_field('chat_id', TELEGRAM_CHAT_ID)
-                            data_fallback.add_field('caption', caption_plain)
-                            data_fallback.add_field('photo', photo_data, filename="image.jpg")
-                            async with session.post(url, data=data_fallback, timeout=20) as resp2:
-                                if resp2.status == 200:
-                                    print(f"✈️ [Telegram]: Photo + Plain text sent for {safe_title}")
-                                    sent_successfully = True
+                            err_txt = await resp.text()
+                            print(f"❌ Telegram Photo Send Failed ({resp.status}): {err_txt}")
 
         except Exception as img_err:
             print(f"⚠️ Failed to process image ({img_err}), falling back to text.")
@@ -262,18 +253,15 @@ async def send_to_telegram(session, page_title, text, post_url, image_url=None, 
     if not sent_successfully:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': caption_md, 'parse_mode': 'Markdown', 'disable_web_page_preview': False}
+            payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': caption, 'disable_web_page_preview': False}
             async with session.post(url, json=payload, timeout=15) as resp:
                 if resp.status == 200:
                     print(f"✈️ [Telegram]: Text & Link sent for {safe_title}")
                 else:
-                    payload_plain = {'chat_id': TELEGRAM_CHAT_ID, 'text': caption_plain, 'disable_web_page_preview': False}
-                    async with session.post(url, json=payload_plain, timeout=15) as resp2:
-                        if resp2.status == 200:
-                            print(f"✈️ [Telegram]: Plain text sent for {safe_title}")
+                    err_txt = await resp.text()
+                    print(f"❌ Telegram Send Failed ({resp.status}): {err_txt}")
         except Exception as e:
             print(f"⚠️ Telegram text sending failed: {e}")
-
 # ==================== 👁️ GEMINI VISION OCR ENGINE ====================
 async def extract_text_from_image_url(session, image_url):
     if not image_url:
