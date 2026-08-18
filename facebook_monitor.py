@@ -165,6 +165,15 @@ async def is_post_exists(post_id):
 async def is_recent_content_duplicate(target_url, clean_text, hours=24, prefix_len=60):
     if not clean_text:
         return False
+
+    # النصوص البديلة العامة (بين أقواس مربعة) مثل "[بث مباشر / مقطع فيديو]" أو
+    # "[منشور يحتوي على صورة]" ليست محتوىً مميّزًا فعليًا — من الطبيعي أن تتكرر
+    # حرفيًا بين منشورات مختلفة تمامًا لا تحوي نصًا حقيقيًا. استبعادها من هذا
+    # الفحص يمنع حجب منشورات جديدة فعلاً بالخطأ.
+    stripped = clean_text.strip()
+    if stripped.startswith('[') and stripped.endswith(']'):
+        return False
+
     threshold = (datetime.now() - timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S')
     rows = await _turso_execute(
         'SELECT text FROM posts WHERE target_url = ? AND created_at >= ?',
