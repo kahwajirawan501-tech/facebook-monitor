@@ -165,10 +165,6 @@ async def is_post_exists(post_id):
 async def is_recent_content_duplicate(target_url, clean_text, hours=24, prefix_len=60):
     if not clean_text:
         return False
-    stripped = clean_text.strip()
-    if stripped.startswith('[') and stripped.endswith(']'):
-        return False
-
     threshold = (datetime.now() - timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S')
     rows = await _turso_execute(
         'SELECT text FROM posts WHERE target_url = ? AND created_at >= ?',
@@ -196,6 +192,7 @@ async def save_post_to_db(post_id, text, post_url, image_url, video_url, target_
     print(f"💾 Saved [{post_id[:12]}] to Turso!")
 
 # ==================== ✈️ ASYNC TELEGRAM BOT CLIENT ====================
+# ==================== ✈️ ASYNC TELEGRAM BOT CLIENT ====================
 async def send_to_telegram(session, page_title, text, post_url, image_url=None, has_video=False):
     if not TELEGRAM_BOT_TOKEN:
         print("⚠️ لم يتم ضبط Telegram Bot Token!")
@@ -203,14 +200,12 @@ async def send_to_telegram(session, page_title, text, post_url, image_url=None, 
 
     safe_title = re.sub(r'[*_`\[\]()]', '', page_title)
 
-    caption = f"📢 {safe_title}\n\n"
-    if text and text != "[بث مباشر / مقطع فيديو]":
-        caption += f"{text[:600]}\n\n"
-    
+    # روابط ظاهرة كنص عادي مباشرةً (بدون Markdown hyperlink) — لا حاجة لأي
+    # parse_mode بعد الآن لأن الرسالة كلها نص عادي.
+    caption = f"📢 {safe_title}\n\n{text[:800]}\n\n"
     if has_video:
-        caption += f"🎬 رابط الفيديو المباشر: {post_url}\n"
-    else:
-        caption += f"🔗 رابط المنشور: {post_url}"
+        caption += f"🎬 رابط الفيديو: {post_url}\n\n"
+    caption += f"🔗 رابط المنشور: {post_url}"
 
     sent_successfully = False
 
@@ -240,10 +235,14 @@ async def send_to_telegram(session, page_title, text, post_url, image_url=None, 
 
                     async with session.post(url, data=data, timeout=20) as resp:
                         if resp.status == 200:
-                            print(f"✈️ [Telegram]: Photo + Video Link sent for {safe_title}")
+                            print(f"✈️ [Telegram]: Photo + Link sent for {safe_title}")
                             sent_successfully = True
-        except Exception:
-            pass
+                        else:
+                            err_txt = await resp.text()
+                            print(f"❌ Telegram Photo Send Failed ({resp.status}): {err_txt}")
+
+        except Exception as img_err:
+            print(f"⚠️ Failed to process image ({img_err}), falling back to text.")
         finally:
             if os.path.exists(temp_img_path):
                 try:
@@ -257,10 +256,12 @@ async def send_to_telegram(session, page_title, text, post_url, image_url=None, 
             payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': caption, 'disable_web_page_preview': False}
             async with session.post(url, json=payload, timeout=15) as resp:
                 if resp.status == 200:
-                    print(f"✈️ [Telegram]: Video Link sent successfully.")
+                    print(f"✈️ [Telegram]: Text & Link sent for {safe_title}")
+                else:
+                    err_txt = await resp.text()
+                    print(f"❌ Telegram Send Failed ({resp.status}): {err_txt}")
         except Exception as e:
-            print(f"⚠️ Telegram sending failed: {e}")
-
+            print(f"⚠️ Telegram text sending failed: {e}")
 # ==================== 👁️ GEMINI VISION OCR ENGINE ====================
 async def extract_text_from_image_url(session, image_url):
     if not image_url:
@@ -291,7 +292,7 @@ async def extract_text_from_image_url(session, image_url):
 
                 def call_gemini():
                     response = gemini_client.models.generate_content(
-                       model='gemini-2.5-flash',
+                        model='gemini-2.5-flash',
                         contents=[prompt, img]
                     )
                     return response.text.strip()
@@ -305,6 +306,7 @@ async def extract_text_from_image_url(session, image_url):
                         pass
 
                 return extracted_text
+
     except Exception as e:
         print(f"⚠️ Gemini Vision OCR error: {e}")
         if os.path.exists(temp_img_path):
@@ -346,8 +348,8 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
             if (aria.includes('comment by') || aria.includes('reply by') || aria.includes('تعليق') || aria.includes('رد')) return false;
             let isInsideUl = e.closest('ul') !== null;
             let isComposer = e.querySelector('div[aria-label*="Write something"]') !== null || 
-                             e.querySelector('div[aria-label*="بماذا تفكر"]') !== null || 
-                             e.querySelector('div[aria-label*="أنشئ منشوراً"]') !== null;
+                           e.querySelector('div[aria-label*="بماذا تفكر"]') !== null || 
+                           e.querySelector('div[aria-label*="أنشئ منشوراً"]') !== null;
             if (isInsideUl || isComposer) return false;
 
             let innerText = e.innerText || '';
@@ -455,6 +457,7 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
 
     is_only_link = bool(real_post_text.startswith("http") or "http" in real_post_text) and len(real_post_text) < 120
 
+    # 🛠️ التحقق مما إذا كان النص عبارة عن هاشتاقات فقط أو رموز قصيرة
     is_mostly_hashtags = False
     if real_post_text:
         post_lines = [l.strip() for l in real_post_text.split('\n') if l.strip()]
@@ -462,7 +465,9 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
         if len(post_lines) > 0 and (hashtag_lines / len(post_lines) >= 0.5 or len(real_post_text) < 25):
             is_mostly_hashtags = True
 
+    # المنطق المحدث لضمان قراءة الصورة بالـ OCR عند غياب الخبر النصي أو وجود هاشتاقات
     if image_url and (is_mostly_hashtags or not real_post_text or is_only_link):
+        print(f"👁️ النص في المنشور عبارة عن هاشتاقات/روابط فقط، جاري قراءة تفاصيل الخبر من الصورة عبر Gemini Vision...")
         ocr_text = await extract_text_from_image_url(http_session, image_url)
         clean_post_text = ocr_text if ocr_text else (real_post_text if real_post_text else "[منشور يحتوي على صورة]")
     elif len(real_post_text) >= 15 and not is_only_link:
@@ -595,9 +600,11 @@ async def monitor_target_worker(context, target_url, semaphore, http_session):
                             continue
 
                         if await is_recent_content_duplicate(target_url, text):
+                            print(f"🔁 Skipping likely duplicate content (recent match) in [{page_title}].")
                             await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
                             continue
 
+                        print(f"🚨 New Post Found in [{page_title}]!")
                         found_new_this_pass = True
                         is_new = True
                         await save_post_to_db(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
