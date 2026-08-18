@@ -262,6 +262,7 @@ async def send_to_telegram(session, page_title, text, post_url, image_url=None, 
                     print(f"❌ Telegram Send Failed ({resp.status}): {err_txt}")
         except Exception as e:
             print(f"⚠️ Telegram text sending failed: {e}")
+
 # ==================== 👁️ GEMINI VISION OCR ENGINE ====================
 async def extract_text_from_image_url(session, image_url):
     if not image_url:
