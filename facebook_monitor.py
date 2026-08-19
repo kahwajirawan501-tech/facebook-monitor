@@ -3,10 +3,9 @@ import re
 import io
 import json
 import uuid
+import time
 import asyncio
 import hashlib
-import time
-
 import warnings
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, urljoin
@@ -168,10 +167,6 @@ async def is_recent_content_duplicate(target_url, clean_text, hours=24, prefix_l
     if not clean_text:
         return False
 
-    # النصوص البديلة العامة (بين أقواس مربعة) مثل "[بث مباشر / مقطع فيديو]" أو
-    # "[منشور يحتوي على صورة]" ليست محتوىً مميّزًا فعليًا — من الطبيعي أن تتكرر
-    # حرفيًا بين منشورات مختلفة تمامًا لا تحوي نصًا حقيقيًا. استبعادها من هذا
-    # الفحص يمنع حجب منشورات جديدة فعلاً بالخطأ.
     stripped = clean_text.strip()
     if stripped.startswith('[') and stripped.endswith(']'):
         return False
@@ -299,14 +294,12 @@ async def extract_text_from_image_url(session, image_url):
                 3. أعد النص المستخرج فقط. لا تضف أي مقدمات، شروحات، أو علامات تنسيق مثل (```text).
                 """
 
-
                 def call_gemini():
                     primary_model = 'gemini-3.6-flash'
-                    fallback_model = 'gemini-1.5-flash'  # النموذج البديل
-                    
+                    fallback_model = 'gemini-1.5-flash'
                     models_to_try = [primary_model, fallback_model]
                     max_retries_per_model = 2
-                    
+
                     for model_name in models_to_try:
                         delay = 2
                         for attempt in range(max_retries_per_model):
@@ -327,9 +320,29 @@ async def extract_text_from_image_url(session, image_url):
                                         delay *= 2
                                         continue
                                 print(f"⚠️ فشل النموذج {model_name} بسبب الخطأ: {err_str}")
-                                break  # الانتقال للنموذج التالي إذا فشلت محاولات هذا النموذج
-                    
+                                break
                     return ""
+
+                extracted_text = await asyncio.to_thread(call_gemini)
+
+                if os.path.exists(temp_img_path):
+                    try:
+                        os.remove(temp_img_path)
+                    except Exception:
+                        pass
+
+                return extracted_text
+
+    except Exception as e:
+        print(f"⚠️ Gemini Vision OCR error: {e}")
+        if os.path.exists(temp_img_path):
+            try:
+                os.remove(temp_img_path)
+            except Exception:
+                pass
+
+    return ""
+
 # ==================== 🔑 FB ID EXTRACTION ====================
 def extract_facebook_post_id(url: str) -> str | None:
     if not url:
@@ -361,8 +374,8 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
             if (aria.includes('comment by') || aria.includes('reply by') || aria.includes('تعليق') || aria.includes('رد')) return false;
             let isInsideUl = e.closest('ul') !== null;
             let isComposer = e.querySelector('div[aria-label*="Write something"]') !== null || 
-                           e.querySelector('div[aria-label*="بماذا تفكر"]') !== null || 
-                           e.querySelector('div[aria-label*="أنشئ منشوراً"]') !== null;
+                             e.querySelector('div[aria-label*="بماذا تفكر"]') !== null || 
+                             e.querySelector('div[aria-label*="أنشئ منشوراً"]') !== null;
             if (isInsideUl || isComposer) return false;
 
             let innerText = e.innerText || '';
@@ -455,7 +468,7 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
             "/videos/", "/reel/", "/watch", "/live/", "l.facebook.com"
         ]):
             if not any(skip in href for skip in ["comment_id", "reply_comment_id", "/user/", "/friends/"]):
-                post_url = f"https://www.facebook.com{href}" if href.startswith('/') else href
+                post_url = f"[https://www.facebook.com](https://www.facebook.com){href}" if href.startswith('/') else href
                 break
 
     has_video = await post_element.evaluate("""
