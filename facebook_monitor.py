@@ -5,6 +5,8 @@ import json
 import uuid
 import asyncio
 import hashlib
+import time
+
 import warnings
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, urljoin
@@ -297,33 +299,37 @@ async def extract_text_from_image_url(session, image_url):
                 3. أعد النص المستخرج فقط. لا تضف أي مقدمات، شروحات، أو علامات تنسيق مثل (```text).
                 """
 
+
                 def call_gemini():
-                    response = gemini_client.models.generate_content(
-                        model='gemini-3.6-flash',
-                        contents=[prompt, img]
-                    )
-                    return response.text.strip()
-
-                extracted_text = await asyncio.to_thread(call_gemini)
-
-                if os.path.exists(temp_img_path):
-                    try:
-                        os.remove(temp_img_path)
-                    except Exception:
-                        pass
-
-                return extracted_text
-
-    except Exception as e:
-        print(f"⚠️ Gemini Vision OCR error: {e}")
-        if os.path.exists(temp_img_path):
-            try:
-                os.remove(temp_img_path)
-            except Exception:
-                pass
-
-    return ""
-
+                    primary_model = 'gemini-3.6-flash'
+                    fallback_model = 'gemini-1.5-flash'  # النموذج البديل
+                    
+                    models_to_try = [primary_model, fallback_model]
+                    max_retries_per_model = 2
+                    
+                    for model_name in models_to_try:
+                        delay = 2
+                        for attempt in range(max_retries_per_model):
+                            try:
+                                response = gemini_client.models.generate_content(
+                                    model=model_name,
+                                    contents=[prompt, img]
+                                )
+                                text_result = response.text.strip()
+                                if text_result:
+                                    return text_result
+                            except Exception as e:
+                                err_str = str(e)
+                                if "503" in err_str or "UNAVAILABLE" in err_str or "high demand" in err_str:
+                                    if attempt < max_retries_per_model - 1:
+                                        print(f"⚠️ ضغط على النموذج {model_name}، جاري إعادة المحاولة خلال {delay} ثوانٍ...")
+                                        time.sleep(delay)
+                                        delay *= 2
+                                        continue
+                                print(f"⚠️ فشل النموذج {model_name} بسبب الخطأ: {err_str}")
+                                break  # الانتقال للنموذج التالي إذا فشلت محاولات هذا النموذج
+                    
+                    return ""
 # ==================== 🔑 FB ID EXTRACTION ====================
 def extract_facebook_post_id(url: str) -> str | None:
     if not url:
