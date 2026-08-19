@@ -165,6 +165,15 @@ async def is_post_exists(post_id):
 async def is_recent_content_duplicate(target_url, clean_text, hours=24, prefix_len=60):
     if not clean_text:
         return False
+
+    # النصوص البديلة العامة (بين أقواس مربعة) مثل "[بث مباشر / مقطع فيديو]" أو
+    # "[منشور يحتوي على صورة]" ليست محتوىً مميّزًا فعليًا — من الطبيعي أن تتكرر
+    # حرفيًا بين منشورات مختلفة تمامًا لا تحوي نصًا حقيقيًا. استبعادها من هذا
+    # الفحص يمنع حجب منشورات جديدة فعلاً بالخطأ.
+    stripped = clean_text.strip()
+    if stripped.startswith('[') and stripped.endswith(']'):
+        return False
+
     threshold = (datetime.now() - timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S')
     rows = await _turso_execute(
         'SELECT text FROM posts WHERE target_url = ? AND created_at >= ?',
@@ -192,7 +201,6 @@ async def save_post_to_db(post_id, text, post_url, image_url, video_url, target_
     print(f"💾 Saved [{post_id[:12]}] to Turso!")
 
 # ==================== ✈️ ASYNC TELEGRAM BOT CLIENT ====================
-# ==================== ✈️ ASYNC TELEGRAM BOT CLIENT ====================
 async def send_to_telegram(session, page_title, text, post_url, image_url=None, has_video=False):
     if not TELEGRAM_BOT_TOKEN:
         print("⚠️ لم يتم ضبط Telegram Bot Token!")
@@ -200,8 +208,6 @@ async def send_to_telegram(session, page_title, text, post_url, image_url=None, 
 
     safe_title = re.sub(r'[*_`\[\]()]', '', page_title)
 
-    # روابط ظاهرة كنص عادي مباشرةً (بدون Markdown hyperlink) — لا حاجة لأي
-    # parse_mode بعد الآن لأن الرسالة كلها نص عادي.
     caption = f"📢 {safe_title}\n\n{text[:800]}\n\n"
     if has_video:
         caption += f"🎬 رابط الفيديو: {post_url}\n\n"
@@ -293,7 +299,7 @@ async def extract_text_from_image_url(session, image_url):
 
                 def call_gemini():
                     response = gemini_client.models.generate_content(
-                        model='gemini-2.5-flash',
+                        model='gemini-3.6-flash',
                         contents=[prompt, img]
                     )
                     return response.text.strip()
@@ -443,7 +449,7 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
             "/videos/", "/reel/", "/watch", "/live/", "l.facebook.com"
         ]):
             if not any(skip in href for skip in ["comment_id", "reply_comment_id", "/user/", "/friends/"]):
-                post_url = f"[https://www.facebook.com](https://www.facebook.com){href}" if href.startswith('/') else href
+                post_url = f"https://www.facebook.com{href}" if href.startswith('/') else href
                 break
 
     has_video = await post_element.evaluate("""
@@ -458,7 +464,6 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
 
     is_only_link = bool(real_post_text.startswith("http") or "http" in real_post_text) and len(real_post_text) < 120
 
-    # 🛠️ التحقق مما إذا كان النص عبارة عن هاشتاقات فقط أو رموز قصيرة
     is_mostly_hashtags = False
     if real_post_text:
         post_lines = [l.strip() for l in real_post_text.split('\n') if l.strip()]
@@ -466,7 +471,6 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
         if len(post_lines) > 0 and (hashtag_lines / len(post_lines) >= 0.5 or len(real_post_text) < 25):
             is_mostly_hashtags = True
 
-    # المنطق المحدث لضمان قراءة الصورة بالـ OCR عند غياب الخبر النصي أو وجود هاشتاقات
     if image_url and (is_mostly_hashtags or not real_post_text or is_only_link):
         print(f"👁️ النص في المنشور عبارة عن هاشتاقات/روابط فقط، جاري قراءة تفاصيل الخبر من الصورة عبر Gemini Vision...")
         ocr_text = await extract_text_from_image_url(http_session, image_url)
