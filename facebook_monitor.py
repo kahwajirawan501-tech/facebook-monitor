@@ -297,7 +297,7 @@ async def extract_text_from_image_url(session, image_url):
                 def call_gemini():
                     time.sleep(3) # مهلة زمنية لتجنب ضغط الطلبات اللحظي
                     response = gemini_client.models.generate_content(
-                        model='gemini-1.5-flash',
+                        model='gemini-3.6-flash',
                         contents=[prompt, img]
                     )
                     return response.text.strip()
