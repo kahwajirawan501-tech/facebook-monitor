@@ -295,33 +295,12 @@ async def extract_text_from_image_url(session, image_url):
                 """
 
                 def call_gemini():
-                    primary_model = 'gemini-3.6-flash'
-                    fallback_model = 'gemini-1.5-flash'
-                    models_to_try = [primary_model, fallback_model]
-                    max_retries_per_model = 2
-
-                    for model_name in models_to_try:
-                        delay = 2
-                        for attempt in range(max_retries_per_model):
-                            try:
-                                response = gemini_client.models.generate_content(
-                                    model=model_name,
-                                    contents=[prompt, img]
-                                )
-                                text_result = response.text.strip()
-                                if text_result:
-                                    return text_result
-                            except Exception as e:
-                                err_str = str(e)
-                                if "503" in err_str or "UNAVAILABLE" in err_str or "high demand" in err_str:
-                                    if attempt < max_retries_per_model - 1:
-                                        print(f"⚠️ ضغط على النموذج {model_name}، جاري إعادة المحاولة خلال {delay} ثوانٍ...")
-                                        time.sleep(delay)
-                                        delay *= 2
-                                        continue
-                                print(f"⚠️ فشل النموذج {model_name} بسبب الخطأ: {err_str}")
-                                break
-                    return ""
+                    time.sleep(3) # مهلة زمنية لتجنب ضغط الطلبات اللحظي
+                    response = gemini_client.models.generate_content(
+                        model='gemini-1.5-flash',
+                        contents=[prompt, img]
+                    )
+                    return response.text.strip()
 
                 extracted_text = await asyncio.to_thread(call_gemini)
 
@@ -490,17 +469,19 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
         if len(post_lines) > 0 and (hashtag_lines / len(post_lines) >= 0.5 or len(real_post_text) < 25):
             is_mostly_hashtags = True
 
-    if image_url and (is_mostly_hashtags or not real_post_text or is_only_link):
-        print(f"👁️ النص في المنشور عبارة عن هاشتاقات/روابط فقط، جاري قراءة تفاصيل الخبر من الصورة عبر Gemini Vision...")
+    # 👁️ [تعديل شرط متى يتم طلب Gemini حصرياً]:
+    # 1. إذا وجدنا صورة ولم يكن هناك أي نص حقيقي (not real_post_text).
+    # 2. أو إذا كان النص الموجود عبارة عن هاشتاقات أو روابط فقط (is_mostly_hashtags أو is_only_link).
+    needs_gemini = image_url and (not real_post_text or is_mostly_hashtags or is_only_link)
+
+    if needs_gemini:
+        print(f"👁️ المنشور يحتاج إلى استخراج النص من الصورة (صورة بدون نص / هاشتاقات / روابط)، جاري القراءة عبر Gemini Vision...")
         ocr_text = await extract_text_from_image_url(http_session, image_url)
         clean_post_text = ocr_text if ocr_text else (real_post_text if real_post_text else "[منشور يحتوي على صورة]")
     elif len(real_post_text) >= 15 and not is_only_link:
         clean_post_text = real_post_text
     elif has_video:
         clean_post_text = real_post_text if real_post_text and not is_only_link else "[بث مباشر / مقطع فيديو]"
-    elif image_url:
-        ocr_text = await extract_text_from_image_url(http_session, image_url)
-        clean_post_text = ocr_text if ocr_text else real_post_text
     elif len(real_post_text) >= 1:
         clean_post_text = real_post_text
     else:
