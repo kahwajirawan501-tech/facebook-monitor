@@ -267,6 +267,7 @@ async def send_to_telegram(session, page_title, text, post_url, image_url=None, 
             print(f"⚠️ Telegram text sending failed: {e}")
 
 # ==================== 👁️ GEMINI VISION OCR ENGINE ====================
+# ==================== 👁️ GEMINI VISION OCR ENGINE ====================
 async def extract_text_from_image_url(session, image_url):
     if not image_url:
         return ""
@@ -295,14 +296,31 @@ async def extract_text_from_image_url(session, image_url):
                 """
 
                 def call_gemini():
-                    time.sleep(3) # مهلة زمنية لتجنب ضغط الطلبات اللحظي
                     response = gemini_client.models.generate_content(
                         model='gemini-3.6-flash',
                         contents=[prompt, img]
                     )
                     return response.text.strip()
 
-                extracted_text = await asyncio.to_thread(call_gemini)
+                # محاولات إعادة فعلية عند ازدحام Gemini المؤقت (503 UNAVAILABLE).
+                # هذا استبدال كامل لمنطق time.sleep(3) القديم الذي كان يؤخر
+                # الطلب الأول فقط دون إعادة أي محاولة بعد فشله. هنا: حتى 3
+                # محاولات فعلية بفاصل متزايد (3s ثم 6s) قبل الاستسلام النهائي.
+                extracted_text = ""
+                max_retries = 3
+                for attempt in range(1, max_retries + 1):
+                    try:
+                        extracted_text = await asyncio.to_thread(call_gemini)
+                        break
+                    except Exception as gemini_err:
+                        err_str = str(gemini_err)
+                        is_overloaded = "UNAVAILABLE" in err_str or "503" in err_str
+                        if is_overloaded and attempt < max_retries:
+                            wait_s = 3 * attempt
+                            print(f"⏳ Gemini overloaded (محاولة {attempt}/{max_retries})، إعادة المحاولة خلال {wait_s} ثانية...")
+                            await asyncio.sleep(wait_s)
+                            continue
+                        raise
 
                 if os.path.exists(temp_img_path):
                     try:
@@ -321,7 +339,6 @@ async def extract_text_from_image_url(session, image_url):
                 pass
 
     return ""
-
 # ==================== 🔑 FB ID EXTRACTION ====================
 def extract_facebook_post_id(url: str) -> str | None:
     if not url:
