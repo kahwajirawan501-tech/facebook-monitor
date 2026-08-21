@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 from playwright.async_api import async_playwright
 from PIL import Image
 from google import genai
+from google.genai.errors import APIError
 
 # ==================== 🔕 SUPPRESS WARNINGS ====================
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -40,7 +41,13 @@ TELEGRAM_CHAT_ID = _get_env("TELEGRAM_CHAT_ID")
 TURSO_DATABASE_URL = _get_env("TURSO_DATABASE_URL")
 TURSO_AUTH_TOKEN = _get_env("TURSO_AUTH_TOKEN")
 
-GEMINI_API_KEY = _get_env("GEMINI_API_KEY")
+# قراءة مفاتيح Gemini (الأول والثاني الاحتياطي)
+GEMINI_KEYS = [
+    _get_env("GEMINI_API_KEY"),
+    _get_env("GEMINI_API_KEY_2", required=False)
+]
+# تصفية أي مفتاح فارغ إن لم يتم إضافته
+GEMINI_KEYS = [k for k in GEMINI_KEYS if k]
 
 MAX_CONCURRENT_TASKS = int(_get_env("MAX_CONCURRENT_TASKS", required=False, default="3"))
 CHECK_INTERVAL_SECONDS = int(_get_env("CHECK_INTERVAL_SECONDS", required=False, default="120"))
@@ -55,9 +62,12 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 # قفل لمنع تضارب الكتابة في قاعدة البيانات
 db_lock: asyncio.Lock | None = None
 
-# ==================== 🧠 GEMINI AI CLIENT ====================
-print("⏳ Initializing Google GenAI Client for Vision OCR...")
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+# ==================== 🧠 GEMINI AI CLIENT WITH FAILOVER ====================
+print(f"⏳ Initializing Google GenAI Clients ({len(GEMINI_KEYS)} keys loaded)...")
+current_key_index = 0
+
+def get_gemini_client():
+    return genai.Client(api_key=GEMINI_KEYS[current_key_index])
 
 # ==================== 🗄️ TURSO DATABASE LAYER ====================
 db_session: aiohttp.ClientSession | None = None
@@ -266,9 +276,9 @@ async def send_to_telegram(session, page_title, text, post_url, image_url=None, 
         except Exception as e:
             print(f"⚠️ Telegram text sending failed: {e}")
 
-# ==================== 👁️ GEMINI VISION OCR ENGINE ====================
-# ==================== 👁️ GEMINI VISION OCR ENGINE ====================
+# ==================== 👁️ GEMINI VISION OCR ENGINE WITH KEY ROTATION ====================
 async def extract_text_from_image_url(session, image_url):
+    global current_key_index
     if not image_url:
         return ""
 
@@ -296,31 +306,47 @@ async def extract_text_from_image_url(session, image_url):
                 """
 
                 def call_gemini():
-                    response = gemini_client.models.generate_content(
+                    client = get_gemini_client()
+                    response = client.models.generate_content(
                         model='gemini-3.6-flash',
                         contents=[prompt, img]
                     )
                     return response.text.strip()
 
-                # محاولات إعادة فعلية عند ازدحام Gemini المؤقت (503 UNAVAILABLE).
-                # هذا استبدال كامل لمنطق time.sleep(3) القديم الذي كان يؤخر
-                # الطلب الأول فقط دون إعادة أي محاولة بعد فشله. هنا: حتى 3
-                # محاولات فعلية بفاصل متزايد (3s ثم 6s) قبل الاستسلام النهائي.
                 extracted_text = ""
                 max_retries = 3
-                for attempt in range(1, max_retries + 1):
-                    try:
-                        extracted_text = await asyncio.to_thread(call_gemini)
+                
+                # حلقة لتجربة المفاتيح المتاحة تباعاً في حال فشل المفتاح الحالي
+                for key_attempt in range(len(GEMINI_KEYS)):
+                    success_with_key = False
+                    for attempt in range(1, max_retries + 1):
+                        try:
+                            extracted_text = await asyncio.to_thread(call_gemini)
+                            success_with_key = True
+                            break
+                        except Exception as gemini_err:
+                            err_str = str(gemini_err)
+                            is_quota_error = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
+                            is_overloaded = "UNAVAILABLE" in err_str or "503" in err_str
+                            
+                            if is_quota_error:
+                                print(f"⚠️ المفتاح رقم {current_key_index + 1} استنفد حصته (429)، جاري التبديل للمفتاح التالي...")
+                                current_key_index = (current_key_index + 1) % len(GEMINI_KEYS)
+                                break # الخروج من محاولات هذا المفتاح والانتقال للمفتاح الجديد مباشرة
+                            elif is_overloaded and attempt < max_retries:
+                                wait_s = 3 * attempt
+                                print(f"⏳ Gemini overloaded (محاولة {attempt}/{max_retries}) للمفتاح {current_key_index + 1}، الانتظار {wait_s} ثانية...")
+                                await asyncio.sleep(wait_s)
+                                continue
+                            else:
+                                if attempt == max_retries:
+                                    print(f"⚠️ فشل المفتاح الحالي بعد عدة محاولات: {gemini_err}")
+                                    current_key_index = (current_key_index + 1) % len(GEMINI_KEYS)
+                                    break
+                                raise
+                    
+                    if success_with_key:
                         break
-                    except Exception as gemini_err:
-                        err_str = str(gemini_err)
-                        is_overloaded = "UNAVAILABLE" in err_str or "503" in err_str
-                        if is_overloaded and attempt < max_retries:
-                            wait_s = 3 * attempt
-                            print(f"⏳ Gemini overloaded (محاولة {attempt}/{max_retries})، إعادة المحاولة خلال {wait_s} ثانية...")
-                            await asyncio.sleep(wait_s)
-                            continue
-                        raise
 
                 if os.path.exists(temp_img_path):
                     try:
@@ -339,6 +365,7 @@ async def extract_text_from_image_url(session, image_url):
                 pass
 
     return ""
+
 # ==================== 🔑 FB ID EXTRACTION ====================
 def extract_facebook_post_id(url: str) -> str | None:
     if not url:
@@ -486,9 +513,6 @@ async def parse_single_post(post_element, target_type, target_url, http_session)
         if len(post_lines) > 0 and (hashtag_lines / len(post_lines) >= 0.5 or len(real_post_text) < 25):
             is_mostly_hashtags = True
 
-    # 👁️ [تعديل شرط متى يتم طلب Gemini حصرياً]:
-    # 1. إذا وجدنا صورة ولم يكن هناك أي نص حقيقي (not real_post_text).
-    # 2. أو إذا كان النص الموجود عبارة عن هاشتاقات أو روابط فقط (is_mostly_hashtags أو is_only_link).
     needs_gemini = image_url and (not real_post_text or is_mostly_hashtags or is_only_link)
 
     if needs_gemini:
@@ -711,4 +735,4 @@ async def main():
             pass
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.main(main())
