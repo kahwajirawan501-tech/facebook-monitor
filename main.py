@@ -7,6 +7,8 @@ import json
 import warnings
 
 import aiohttp
+from playwright.async_api import async_playwright
+
 from src.config import Config
 from src.db import Database
 from src.logger_setup import setup_logger
