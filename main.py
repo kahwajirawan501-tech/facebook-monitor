@@ -7,15 +7,13 @@ import json
 import warnings
 
 import aiohttp
-from playwright.async_api import async_playwright
-
-from config import Config
-from db import Database
-from logger_setup import setup_logger
-from monitor import HealthTracker, monitor_target
-from ocr_engine import GeminiOCR
-from post_parser import PostParser
-from telegram_client import TelegramClient
+from src.config import Config
+from src.db import Database
+from src.logger_setup import setup_logger
+from src.monitor import HealthTracker, monitor_target
+from src.ocr_engine import GeminiOCR
+from src.post_parser import PostParser
+from src.telegram_client import TelegramClient
 
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
