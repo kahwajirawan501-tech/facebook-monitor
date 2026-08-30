@@ -8,11 +8,9 @@ import hashlib
 import json
 import re
 
-from ocr_engine import GeminiOCR
-from text_filters import looks_like_garbage_line, strip_boilerplate_lines
-from url_utils import clean_facebook_url, extract_facebook_post_id
-
-
+from .ocr_engine import GeminiOCR
+from .text_filters import looks_like_garbage_line, strip_boilerplate_lines
+from .url_utils import clean_facebook_url, extract_facebook_post_id
 class PostParser:
     def __init__(self, selectors: dict, ocr: GeminiOCR, logger):
         self.selectors = selectors
