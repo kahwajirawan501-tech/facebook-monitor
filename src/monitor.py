@@ -45,22 +45,23 @@ async def detect_page_title(page, selectors: dict) -> str:
         """
         (cfg) => {
             let h1 = document.querySelector(cfg.h1);
+            let excludedList = cfg.excluded || [];
             if (h1 && h1.innerText.trim()) {
                 let text = h1.innerText.trim();
-                if (text && !cfg.excluded.some(x => text.includes(x))) return text;
+                if (text && !excludedList.some(x => text.includes(x))) return text;
             }
 
             let profileLink = document.querySelector(cfg.profile);
             if (profileLink && profileLink.innerText.trim()) {
                 let text = profileLink.innerText.trim();
-                if (text && !cfg.excluded.some(x => text.includes(x))) return text;
+                if (text && !excludedList.some(x => text.includes(x))) return text;
             }
 
             let headerElements = document.querySelectorAll(cfg.header_fallback);
             for (let el of headerElements) {
-                let txt = el.innerText.trim();
+                let txt = el.innerText ? el.innerText.trim() : '';
                 if (txt.length > 2 && txt.length < 50 &&
-                    !['إعجاب', 'مشاركة', 'تعليق', 'Like', 'Share', 'Comment', ...cfg.excluded].includes(txt)) {
+                    !['إعجاب', 'مشاركة', 'تعليق', 'Like', 'Share', 'Comment', ...excludedList].includes(txt)) {
                     if (el.closest('h2') || el.closest('h3') || el.closest('div[role="banner"]')) {
                         return txt;
                     }
@@ -130,8 +131,8 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
                                 await telegram.send_post(http_session, page_title, text, post_url, img_url, has_video)
                                 saved_initial += 1
 
-                        if saved_initial >= 2:
-                            break
+                    if saved_initial >= 2:
+                        break
                     if saved_initial >= 2:
                         break
                     await page.keyboard.press("PageDown")
