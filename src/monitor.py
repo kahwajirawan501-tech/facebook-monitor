@@ -141,8 +141,6 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
 
                     if saved_initial >= 2:
                         break
-                    if saved_initial >= 2:
-                        break
                     await page.keyboard.press("PageDown")
                     await page.wait_for_timeout(2000)
 
