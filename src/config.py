@@ -62,7 +62,8 @@ class Config:
         self.LOG_DIR = _get_env("LOG_DIR", required=False, default="logs")
         self.LOG_LEVEL = _get_env("LOG_LEVEL", required=False, default="INFO")
 
-        selectors_path = _get_env("SELECTORS_FILE", required=False, default="selectors.json")
+        # التعديل هنا لتوجيه المسار نحو مجلد config
+        selectors_path = _get_env("SELECTORS_FILE", required=False, default="config/selectors.json")
         self.selectors = self._load_selectors(selectors_path)
 
         os.makedirs(self.DOWNLOAD_DIR, exist_ok=True)
@@ -76,6 +77,7 @@ class Config:
 
     def reload_selectors(self, path: str | None = None):
         """يسمح بإعادة تحميل selectors.json أثناء التشغيل بدون إعادة تشغيل السكربت كامل."""
-        path = path or _get_env("SELECTORS_FILE", required=False, default="selectors.json")
+        # التعديل هنا أيضاً لتوجيه المسار نحو مجلد config
+        path = path or _get_env("SELECTORS_FILE", required=False, default="config/selectors.json")
         self.selectors = self._load_selectors(path)
         return self.selectors
