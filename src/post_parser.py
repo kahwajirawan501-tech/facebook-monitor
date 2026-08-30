@@ -89,7 +89,7 @@ class PostParser:
                     const t = txt.trim();
                     if (!t) return true;
                     if (/[\u0600-\u06FF]/.test(t)) return false;
-                    if (t.split(/\s+/).length > 1) return false;
+                    if (t.split(/\\s+/).length > 1) return false;
                     if (t.length >= 8 && /^[A-Za-z0-9.]+$/.test(t)) {
                         const hasUpper = /[A-Z]/.test(t);
                         const hasLower = /[a-z]/.test(t);
