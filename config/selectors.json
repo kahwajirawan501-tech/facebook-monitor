@@ -1,0 +1,67 @@
+{
+  "_comment": "هاد الملف بينفصل عن الكود عشان تقدر تحدّث selectors فيسبوك بدون ما تلمس الكود أو تعيد النشر. كل مفتاح بياخد قائمة selectors مرتبة من الأدق للأعم (fallback chain) — النظام بجرب كل واحد لحد ما ينجح.",
+
+  "post_container": [
+    "div[role='feed'] > div",
+    "div[role='article']",
+    "div[data-pagelet*='FeedUnit']"
+  ],
+
+  "close_dialog_buttons": [
+    "div[role='dialog'] div[aria-label='إغلاق']",
+    "div[role='dialog'] div[aria-label='Close']",
+    "div[aria-label='Decline optional cookies']",
+    "div[aria-label='رفض الكوكيز الاختيارية']"
+  ],
+
+  "see_more_button_texts": ["عرض المزيد", "See more"],
+
+  "text_node_selectors": ["div[dir='auto']", "span[dir='auto']"],
+
+  "ignored_headings": [
+    "العناصر المميزة", "Featured",
+    "منشورات أخرى", "More posts", "More Posts", "Other posts", "Other Posts",
+    "صفحات ذات صلة", "Related Pages", "قد يعجبك أيضاً", "Suggested for you",
+    "أشخاص قد تعرفهم", "People You May Know"
+  ],
+
+  "ui_phrases": [
+    "عرض المزيد", "See more", "عرض أقل", "See less", "أعجبني", "تعليق", "مشاركة",
+    "Like", "Comment", "Share", "منشورات جديدة", "منشور مثبت", "Pinned post",
+    "عرض المزيد من التعليقات", "العناصر المميزة", "Featured",
+    "منشورات أخرى", "More posts", "More Posts"
+  ],
+
+  "boilerplate_line_patterns": [
+    "^(المرصد السوري|الحدث السوري|رامي عبد الرحمن|\\d+\\s*د|\\d+\\s*س|\\.|\\s*)$"
+  ],
+
+  "comment_or_reply_aria_markers": ["comment by", "reply by", "تعليق", "رد"],
+
+  "composer_selectors": [
+    "div[aria-label*='Write something']",
+    "div[aria-label*='بماذا تفكر']",
+    "div[aria-label*='أنشئ منشوراً']"
+  ],
+
+  "post_link_keywords": [
+    "/posts/", "/permalink", "pfbid", "story_fbid", "/photo",
+    "/videos/", "/reel/", "/watch", "/live/", "l.facebook.com"
+  ],
+
+  "post_link_skip_keywords": ["comment_id", "reply_comment_id", "/user/", "/friends/"],
+
+  "video_indicators": {
+    "css": ["video", "[data-video-id]", "[aria-label*='تشغيل']", "[aria-label*='Play']"],
+    "link_css": ["a[href*='/videos/']", "a[href*='/reel/']", "a[href*='/watch']", "a[href*='/live/']"],
+    "keywords": ["مباشر", "LIVE", "فيديو"]
+  },
+
+  "page_title_selectors": {
+    "h1": "h1",
+    "profile": "div[role='banner'] h1 a, div[role='main'] h1 span",
+    "header_fallback": "strong, span[style*='font-weight']"
+  },
+
+  "page_title_excluded_texts": ["الإشعارات", "تسجيل الدخول", "Notifications"]
+}

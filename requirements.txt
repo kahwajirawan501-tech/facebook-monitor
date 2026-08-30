@@ -1,0 +1,6 @@
+aiohttp
+aiofiles
+playwright
+google-genai
+Pillow
+python-dotenv
