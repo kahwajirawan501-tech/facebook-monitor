@@ -62,7 +62,7 @@ class Config:
         self.LOG_DIR = _get_env("LOG_DIR", required=False, default="logs")
         self.LOG_LEVEL = _get_env("LOG_LEVEL", required=False, default="INFO")
 
-        # التعديل هنا لتوجيه المسار نحو مجلد config
+        # مسار ملف selectors.json — بمجلد config/ افتراضياً
         selectors_path = _get_env("SELECTORS_FILE", required=False, default="config/selectors.json")
         self.selectors = self._load_selectors(selectors_path)
 
