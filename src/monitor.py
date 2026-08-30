@@ -29,12 +29,22 @@ class HealthTracker:
 
 
 async def find_post_elements(page, container_selectors: list[str], logger):
-    """يجرب selectors حاوية المنشورات بالترتيب لحد ما وحدة ترجع نتائج، ويسجل أيها نجح."""
-    for selector in container_selectors:
-        elements = await page.query_selector_all(selector)
-        if elements:
-            return elements, selector
-    return [], None
+    """يجمع كل العناصر التي تطابق أياً من الـ selectors (union) بدل التوقف عند أول selector
+    يعطي نتيجة. لو بنينا هيك: أول selector لحاله (مثلاً div[role='feed'] > div) بيرجع بس جزء
+    من المنشورات، وبنضيّع منشورات تانية بتطابق selector تاني بس (div[role='article'] أو
+    FeedUnit pagelet) — وهاد كان سبب توقف السكرول بدري لأنو found_new_this_pass بتصير False
+    غلط، مع إنو في منشورات جديدة فعلياً بس ما انلقطوا."""
+    primary_elements = await page.query_selector_all(container_selectors[0])
+    combined_selector = ", ".join(container_selectors)
+    elements = await page.query_selector_all(combined_selector)
+
+    if not elements:
+        return [], None
+
+    if not primary_elements:
+        logger.warning("⚠️ الـ selector الأساسي ما طابق ولا عنصر — تم الاعتماد على selectors احتياطية.")
+
+    return elements, combined_selector
 
 
 async def detect_page_title(page, selectors: dict) -> str:
@@ -114,9 +124,7 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
             if first_run:
                 saved_initial = 0
                 for _ in range(3):
-                    raw_elements, used_selector = await find_post_elements(page, container_selectors, logger)
-                    if used_selector and used_selector != container_selectors[0]:
-                        logger.warning(f"⚠️ استخدم fallback selector: '{used_selector}' بدل الأساسي — قد يشير لتغيّر ببنية فيسبوك.")
+                    raw_elements, _ = await find_post_elements(page, container_selectors, logger)
 
                     for post_elem in raw_elements:
                         post_id, text, post_url, img_url, has_video = await parser.parse(
@@ -145,9 +153,7 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
             seen_in_run = set()
 
             for _scroll_pass in range(5):
-                raw_elements, used_selector = await find_post_elements(page, container_selectors, logger)
-                if used_selector and used_selector != container_selectors[0]:
-                    logger.warning(f"⚠️ استخدم fallback selector: '{used_selector}' بدل الأساسي — قد يشير لتغيّر ببنية فيسبوك.")
+                raw_elements, _ = await find_post_elements(page, container_selectors, logger)
 
                 found_new_this_pass = False
 
