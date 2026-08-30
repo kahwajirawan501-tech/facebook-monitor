@@ -4,7 +4,7 @@
 متتالية لإرسال تنبيه لو فيسبوك غيّر بنيته وكسر الاستخراج.
 """
 
-from src.url_utils import detect_target_type
+from .url_utils import detect_target_type
 
 class HealthTracker:
     """يتتبع عدد الدورات الفارغة المتتالية لكل هدف، ويقرر متى يجب التنبيه."""
