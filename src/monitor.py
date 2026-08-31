@@ -204,6 +204,9 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
                 raw_elements, _ = await find_post_elements(page, container_selectors, logger)
 
                 found_new_this_pass = False
+                _dbg_total = len(raw_elements)
+                _dbg_already_seen = 0
+                _dbg_rejected_no_id = 0
 
                 for post_elem in raw_elements:
                     # نتفادى إعادة معالجة نفس العنصر (وبالتالي إعادة استدعاء Gemini Vision
@@ -214,6 +217,7 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
                         "el => el.dataset.fbMonitorSeen === '1'"
                     )
                     if already_processed:
+                        _dbg_already_seen += 1
                         continue
 
                     post_id, text, post_url, img_url, has_video = await parser.parse(
@@ -221,7 +225,10 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
                     )
                     await post_elem.evaluate("el => { el.dataset.fbMonitorSeen = '1'; }")
 
-                    if not post_id or post_id in seen_in_run:
+                    if not post_id:
+                        _dbg_rejected_no_id += 1
+                        continue
+                    if post_id in seen_in_run:
                         continue
 
                     seen_in_run.add(post_id)
@@ -248,6 +255,11 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
                 # ما منوقف السكرول بمجرد أول مرور "فاضي" — فيسبوك ممكن يكون لسا عم يحمّل
                 # منشورات جديدة (lazy load) وياخد وقت أطول من مرور واحد. منعطيه
                 # `empty_pass_tolerance` مرات متتالية بلا جديد قبل ما نعتبرها نهاية فعلية.
+                logger.info(
+                    f"🔍 [DEBUG_PASS {_scroll_pass + 1}] عناصر موجودة: {_dbg_total} | "
+                    f"معالجة مسبقاً: {_dbg_already_seen} | مرفوضة (مش منشور حقيقي): {_dbg_rejected_no_id} | "
+                    f"جديدة هالمرور: {found_new_this_pass}"
+                )
                 if not found_new_this_pass:
                     consecutive_empty_passes += 1
                     if consecutive_empty_passes >= empty_pass_tolerance:
