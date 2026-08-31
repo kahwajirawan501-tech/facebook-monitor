@@ -113,14 +113,20 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
         debug_network = _os.environ.get("DEBUG_NETWORK", "false").lower() in ("1", "true", "yes")
         _graphql_log = []
         if debug_network:
+            import asyncio as _asyncio
+
+            async def _record_graphql(resp):
+                try:
+                    body = await resp.body()
+                    length = len(body)
+                except Exception:
+                    length = -1
+                _graphql_log.append((resp.status, length, resp.url[:120]))
+
             def _on_response(resp):
                 try:
                     if "graphql" in resp.url.lower():
-                        try:
-                            content_length = resp.headers.get("content-length", "?")
-                        except Exception:
-                            content_length = "?"
-                        _graphql_log.append((resp.status, content_length, resp.url[:120]))
+                        _asyncio.create_task(_record_graphql(resp))
                 except Exception:
                     pass
             page.on("response", _on_response)
@@ -254,16 +260,19 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
                 await page.wait_for_timeout(scroll_wait_ms)
 
             if debug_network:
+                await page.wait_for_timeout(1500)  # نعطي فرصة لمهام قراءة محتوى الردود (async) تخلص
                 if not _graphql_log:
                     logger.warning(f"🌐 [DEBUG_NETWORK] ولا طلب GraphQL واحد انبعت أثناء السكرول لـ {target_url}!")
                 else:
                     status_counts = {}
                     for status, _cl, _url in _graphql_log:
                         status_counts[status] = status_counts.get(status, 0) + 1
-                    sizes = [int(cl) for _s, cl, _u in _graphql_log if str(cl).isdigit()]
+                    sizes = [cl for _s, cl, _u in _graphql_log if isinstance(cl, int) and cl >= 0]
                     logger.info(f"🌐 [DEBUG_NETWORK] عدد طلبات GraphQL: {len(_graphql_log)} | الحالات: {status_counts}")
                     if sizes:
                         logger.info(f"🌐 [DEBUG_NETWORK] أحجام الردود (بايت) — أصغر: {min(sizes)} | أكبر: {max(sizes)} | كلها: {sorted(sizes)}")
+                    else:
+                        logger.warning("🌐 [DEBUG_NETWORK] ما قدرنا نقرأ محتوى ولا رد (فشل قراءة body لكل الطلبات).")
                     failed = [u for s, _cl, u in _graphql_log if s >= 400]
                     for u in failed[:5]:
                         logger.warning(f"🌐 [DEBUG_NETWORK] طلب فاشل: {u}")
