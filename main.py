@@ -81,6 +81,12 @@ async def run():
                             selectors=cfg.selectors,
                             health=health,
                             logger=logger,
+                            scroll_config={
+                                "max_scroll_passes": cfg.MAX_SCROLL_PASSES,
+                                "empty_pass_tolerance": cfg.SCROLL_EMPTY_PASS_TOLERANCE,
+                                "scroll_presses_per_pass": cfg.SCROLL_PRESSES_PER_PASS,
+                                "scroll_wait_ms": cfg.SCROLL_WAIT_MS,
+                            },
                         )
                         for url in cfg.TARGET_URLS
                     ]
