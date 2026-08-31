@@ -20,7 +20,21 @@ OCR_PROMPT = """
 1. استخرج النص كما هو تماماً، وحافظ على تنسيق الفقرات والأسطر.
 2. السياق العام للنص يتعلق بالأخبار والأحداث الميدانية والسياسية. استخدم هذا السياق لتصحيح أي كلمات مشوهة بصرياً.
 3. أعد النص المستخرج فقط. لا تضف أي مقدمات، شروحات، أو علامات تنسيق مثل (```text).
+4. إذا لم يوجد أي نص مقروء داخل الصورة إطلاقاً، أعد سلسلة فارغة تماماً بدون أي كلمات — لا تكتب جملة تشرح عدم وجود نص.
 """
+
+# ردود شائعة يمكن يرجعها Gemini لما ما يلاقي نص، رغم تعليمات البرومبت — منعاملها
+# كنص فاضي بدل ما نستخدمها كأنها محتوى المنشور الفعلي.
+_NO_TEXT_PHRASES = {
+    "لا يوجد نص في الصورة",
+    "لا يوجد نص في الصورة.",
+    "لا يوجد نص",
+    "لا يوجد نص واضح في الصورة",
+    "no text found in the image",
+    "no text found",
+    "no text in the image",
+    "no readable text",
+}
 
 
 class GeminiOCR:
@@ -68,7 +82,17 @@ class GeminiOCR:
         def call_gemini():
             client = self._client()
             response = client.models.generate_content(model=self.model, contents=[OCR_PROMPT, img])
-            return response.text.strip()
+            if response.text is None:
+                # ردّ فاضي (None) غالباً معناه فلاتر أمان Gemini حجبت الرد (صور فيها
+                # محتوى عسكري/سلاح مثلاً) — هاد مش خطأ مؤقت وما رح يتغيّر بإعادة
+                # المحاولة، فبنرجّع نص فاضي فوراً بدل ما نكسر بـ AttributeError.
+                return ""
+            text = response.text.strip()
+            if text.lower() in _NO_TEXT_PHRASES:
+                # Gemini أحياناً بيرد بجملة وصفية ("لا يوجد نص في الصورة") بدل ما يرجع
+                # نص فاضي، رغم تعليمات البرومبت. منعاملها كأنها فاضية.
+                return ""
+            return text
 
         for _key_attempt in range(len(self.api_keys)):
             for attempt in range(1, max_retries + 1):
