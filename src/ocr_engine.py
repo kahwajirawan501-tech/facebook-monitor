@@ -87,17 +87,18 @@ class GeminiOCR:
                         )
                         self._current_key_index = (self._current_key_index + 1) % len(self.api_keys)
                         break
-                    elif is_overloaded and attempt < max_retries:
+                    elif attempt < max_retries:
+                        # overloaded أو أي خطأ تاني غير متوقع بمعاملهم نفس المعاملة: إعادة محاولة
+                        # بنفس المفتاح مع backoff، بدل ما نرمي الاستثناء فوراً من أول محاولة.
                         wait_s = 5 * attempt
+                        label = "Gemini overloaded" if is_overloaded else f"خطأ غير متوقع ({gemini_err})"
                         self.logger.info(
-                            f"⏳ Gemini overloaded (محاولة {attempt}/{max_retries}) للمفتاح {self._current_key_index + 1}، الانتظار {wait_s} ثانية..."
+                            f"⏳ {label} (محاولة {attempt}/{max_retries}) للمفتاح {self._current_key_index + 1}، الانتظار {wait_s} ثانية..."
                         )
                         await asyncio.sleep(wait_s)
                         continue
                     else:
-                        if attempt == max_retries:
-                            self.logger.warning(f"⚠️ فشل المفتاح الحالي بعد عدة محاولات: {gemini_err}")
-                            self._current_key_index = (self._current_key_index + 1) % len(self.api_keys)
-                            break
-                        raise
+                        self.logger.warning(f"⚠️ فشل المفتاح الحالي بعد عدة محاولات: {gemini_err}")
+                        self._current_key_index = (self._current_key_index + 1) % len(self.api_keys)
+                        break
         return ""
