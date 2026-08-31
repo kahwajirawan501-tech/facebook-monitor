@@ -55,6 +55,7 @@ class PostParser:
             },
         )
         if not is_valid:
+            self.logger.info("[PARSE_REJECT] reason=not_valid_container (comment/composer/inside-ul/ignored-heading)")
             return None, None, None, None, False
 
         await post_element.evaluate(
@@ -155,6 +156,18 @@ class PostParser:
                     break
 
         if not found_specific_link:
+            try:
+                _hrefs_sample = []
+                for link in all_links[:8]:
+                    _h = await link.get_attribute("href") or ""
+                    if _h:
+                        _hrefs_sample.append(_h[:80])
+            except Exception:
+                _hrefs_sample = []
+            self.logger.info(
+                f"[PARSE_REJECT] reason=no_matching_post_link total_links={len(all_links)} "
+                f"sample_hrefs={_hrefs_sample}"
+            )
             return None, None, None, None, False
 
         has_video = await post_element.evaluate(
@@ -200,6 +213,10 @@ class PostParser:
         elif len(real_post_text) >= 1:
             clean_post_text = real_post_text
         else:
+            self.logger.info(
+                f"[PARSE_REJECT] reason=empty_text_no_image_no_video image_url={bool(image_url)} "
+                f"has_video={has_video} raw_text_len={len(clean_post_text or '')}"
+            )
             return None, None, None, None, False
 
         fb_id = extract_facebook_post_id(post_url)
