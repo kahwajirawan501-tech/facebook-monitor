@@ -55,6 +55,15 @@ class Config:
             _get_env("EMPTY_CYCLES_ALERT_THRESHOLD", required=False, default="5")
         )
 
+        # إعدادات السكرول: كم مرة نحاول نكمل ننزل بالصفحة كل دورة، وكم مرة نسمح
+        # نلاقي "ولا منشور جديد" متتالية قبل ما نعتبرها نهاية فعلية (مش بس تأخر تحميل).
+        self.MAX_SCROLL_PASSES = int(_get_env("MAX_SCROLL_PASSES", required=False, default="15"))
+        self.SCROLL_EMPTY_PASS_TOLERANCE = int(
+            _get_env("SCROLL_EMPTY_PASS_TOLERANCE", required=False, default="2")
+        )
+        self.SCROLL_PRESSES_PER_PASS = int(_get_env("SCROLL_PRESSES_PER_PASS", required=False, default="2"))
+        self.SCROLL_WAIT_MS = int(_get_env("SCROLL_WAIT_MS", required=False, default="2500"))
+
         self.USER_DATA_DIR = os.path.abspath(_get_env("USER_DATA_DIR", required=False, default="user_data"))
         self.DOWNLOAD_DIR = _get_env("DOWNLOAD_DIR", required=False, default="downloads")
         self.FB_AUTH_STATE_JSON = _get_env("FB_AUTH_STATE_JSON", required=False, default=None)
