@@ -120,8 +120,8 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
             if _os.environ.get("DEBUG_SCREENSHOT", "false").lower() in ("1", "true", "yes"):
                 try:
                     safe_name = detect_target_type(target_url) + "_" + str(abs(hash(target_url)))[:8]
-                    await page.screenshot(path=f"downloads/debug_{safe_name}.png", full_page=True)
-                    logger.info(f"📸 Debug screenshot saved for {target_url}")
+                    await page.screenshot(path=f"downloads/debug_{safe_name}_1_before_scroll.png", full_page=True)
+                    logger.info(f"📸 Debug screenshot (before scroll) saved for {target_url}")
                 except Exception as shot_err:
                     logger.warning(f"⚠️ فشل التقاط سكرين شوت تشخيصي: {shot_err}")
 
@@ -235,6 +235,14 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
                 for _ in range(scroll_presses_per_pass):
                     await page.keyboard.press("PageDown")
                 await page.wait_for_timeout(scroll_wait_ms)
+
+            if _os.environ.get("DEBUG_SCREENSHOT", "false").lower() in ("1", "true", "yes"):
+                try:
+                    safe_name = detect_target_type(target_url) + "_" + str(abs(hash(target_url)))[:8]
+                    await page.screenshot(path=f"downloads/debug_{safe_name}_2_after_scroll.png", full_page=True)
+                    logger.info(f"📸 Debug screenshot (after scroll) saved for {target_url}")
+                except Exception as shot_err:
+                    logger.warning(f"⚠️ فشل التقاط سكرين شوت تشخيصي: {shot_err}")
 
         except Exception as e:
             logger.error(f"❌ Error while monitoring {target_url}: {e}")
