@@ -7,6 +7,9 @@
     "div[data-pagelet*='FeedUnit']"
   ],
 
+  "_comment_post_action_aria_prefixes": "الاستراتيجية الأساسية الجديدة للتعرف على منشور حقيقي (بديل موثوق لأنو role='feed' و role='article' و data-pagelet ماتوا كلياً بواجهة فيسبوك الحالية — تأكدنا من فحص DOM فعلي). زر '...' (خيارات المنشور) على كل بوست حقيقي بالإنجليزي دايماً بغض النظر عن لغة الواجهة.",
+  "post_action_aria_prefixes": ["Actions for this post"],
+
   "close_dialog_buttons": [
     "div[role='dialog'] div[aria-label='إغلاق']",
     "div[role='dialog'] div[aria-label='Close']",
