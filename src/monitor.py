@@ -28,12 +28,69 @@ class HealthTracker:
         return False
 
 
-async def find_post_elements(page, container_selectors: list[str], logger):
-    """يجمع كل العناصر التي تطابق أياً من الـ selectors (union) بدل التوقف عند أول selector
-    يعطي نتيجة. لو بنينا هيك: أول selector لحاله (مثلاً div[role='feed'] > div) بيرجع بس جزء
-    من المنشورات، وبنضيّع منشورات تانية بتطابق selector تاني بس (div[role='article'] أو
-    FeedUnit pagelet) — وهاد كان سبب توقف السكرول بدري لأنو found_new_this_pass بتصير False
-    غلط، مع إنو في منشورات جديدة فعلياً بس ما انلقطوا."""
+async def find_post_elements(page, container_selectors: list[str], logger, post_link_keywords=None, post_action_aria_prefixes=None):
+    """يجمع عناصر المنشورات الحقيقية.
+
+    ★ الاستراتيجية الأساسية (جديدة): فيسبوك عاد بيستخدم role='feed' ولا role='article'
+    ولا data-pagelet*='FeedUnit' على المنشورات الحقيقية اليوم (تأكدنا من هيك بفحص DOM
+    فعلي — الاتنين التانيين كانوا صفر تماماً، والتالت كان بس على تعليقات وعناصر تحميل
+    فاضية). بالمقابل، زر "..." (المزيد من الخيارات) على كل منشور حقيقي إله aria-label
+    ثابت وواضح بالإنجليزي: "Actions for this post by <اسم الناشر>". هاد marker موثوق
+    جداً (باللغة الإنجليزية، مش class مبهم بيتغيّر كل نشر جديد لفيسبوك).
+
+    منطلق من هاد الـ anchor، منطلع بالشجرة لفوق (parentElement) خطوة خطوة لحد ما نلاقي
+    أول جد (ancestor) فيه رابط `<a href>` يطابق أحد `post_link_keywords` — هاد أول جد
+    منطقياً بيكون حدود المنشور الكامل (نص + صورة + شريط لايك/تعليق/مشاركة)، بغض النظر
+    عن أسماء الـ classes الداخلية يلي بتتغيّر.
+
+    لو ما لقينا ولا anchor (يعني فيسبوك غيّر حتى نص الـ aria-label)، منرجع للطريقة
+    القديمة (container_selectors) كـ fallback أخير، بس هاي مش المتوقع تنجح اليوم.
+    """
+    post_link_keywords = post_link_keywords or []
+    aria_prefixes = post_action_aria_prefixes or ["Actions for this post"]
+
+    aria_selector = ", ".join(f'div[aria-label^="{p}"]' for p in aria_prefixes)
+    anchors = await page.query_selector_all(aria_selector)
+
+    if anchors:
+        containers = []
+        for anchor in anchors:
+            try:
+                handle = await anchor.evaluate_handle(
+                    """
+                    (anchorEl, keywords) => {
+                        let node = anchorEl;
+                        for (let i = 0; i < 20 && node; i++) {
+                            node = node.parentElement;
+                            if (!node) break;
+                            const links = Array.from(node.querySelectorAll('a[href]'));
+                            const hasPostLink = links.some(a =>
+                                keywords.some(k => (a.getAttribute('href') || '').includes(k))
+                            );
+                            if (hasPostLink) return node;
+                        }
+                        return null;
+                    }
+                    """,
+                    post_link_keywords,
+                )
+                el = handle.as_element()
+                if el:
+                    containers.append(el)
+                else:
+                    await handle.dispose()
+            except Exception as walk_err:
+                logger.warning(f"⚠️ فشل تتبع الجد لعنصر anchor: {walk_err}")
+
+        if containers:
+            return containers, "aria-actions-anchor"
+
+        logger.warning(
+            "⚠️ لقينا anchors (زر الخيارات) بس ما قدرنا نطلع بالشجرة لأي جد فيه رابط منشور — "
+            "يمكن post_link_keywords احتاجت تحديث."
+        )
+
+    # --- Fallback قديم (fيسبوك يمكن يرجّع role='feed'/role='article'/data-pagelet مستقبلاً) ---
     primary_elements = await page.query_selector_all(container_selectors[0])
     combined_selector = ", ".join(container_selectors)
     elements = await page.query_selector_all(combined_selector)
@@ -161,11 +218,19 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
                 page_title = parsed_path if parsed_path else target_type
 
             container_selectors = selectors["post_container"]
+            _post_link_keywords = selectors.get("post_link_keywords", [])
+            _post_action_aria_prefixes = selectors.get(
+                "post_action_aria_prefixes", ["Actions for this post"]
+            )
 
             if first_run:
                 saved_initial = 0
                 for _ in range(3):
-                    raw_elements, _ = await find_post_elements(page, container_selectors, logger)
+                    raw_elements, _ = await find_post_elements(
+                        page, container_selectors, logger,
+                        post_link_keywords=_post_link_keywords,
+                        post_action_aria_prefixes=_post_action_aria_prefixes,
+                    )
 
                     for post_elem in raw_elements:
                         already_processed = await post_elem.evaluate(
@@ -201,7 +266,11 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
             consecutive_empty_passes = 0
 
             for _scroll_pass in range(max_scroll_passes):
-                raw_elements, _ = await find_post_elements(page, container_selectors, logger)
+                raw_elements, _ = await find_post_elements(
+                    page, container_selectors, logger,
+                    post_link_keywords=_post_link_keywords,
+                    post_action_aria_prefixes=_post_action_aria_prefixes,
+                )
 
                 found_new_this_pass = False
                 _dbg_total = len(raw_elements)
