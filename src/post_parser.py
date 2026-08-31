@@ -117,7 +117,7 @@ class PostParser:
                 return fullText
                     .split('\\n')
                     .map(line => line.trim())
-                    .filter(line => line && !uiPhrases.includes(line) && !/^[0-9٠-٩\s٫,KkMmAaدس]+$/.test(line))
+                    .filter(line => line && !uiPhrases.includes(line) && !/^[0-9٠-٩\\s٫,KkMmAaدس]+$/.test(line))
                     .filter((item, index, self) => self.indexOf(item) === index)
                     .join('\\n');
             }
