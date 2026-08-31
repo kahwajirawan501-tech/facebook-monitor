@@ -48,6 +48,8 @@ jobs:
           SCROLL_WAIT_MS: "3500"
           # تشخيص مؤقت — بيلتقط سكرين شوت من الصفحة زي ما فيسبوك رجعها فعلياً
           DEBUG_SCREENSHOT: "true"
+          # تشخيص مؤقت — بيراقب طلبات GraphQL (تحميل المزيد) أثناء السكرول
+          DEBUG_NETWORK: "true"
           GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
           GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
           GEMINI_API_KEY_4: ${{ secrets.GEMINI_API_KEY_4 }}
