@@ -133,9 +133,17 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
                     raw_elements, _ = await find_post_elements(page, container_selectors, logger)
 
                     for post_elem in raw_elements:
+                        already_processed = await post_elem.evaluate(
+                            "el => el.dataset.fbMonitorSeen === '1'"
+                        )
+                        if already_processed:
+                            continue
+
                         post_id, text, post_url, img_url, has_video = await parser.parse(
                             post_elem, target_type, target_url, http_session
                         )
+                        await post_elem.evaluate("el => { el.dataset.fbMonitorSeen = '1'; }")
+
                         if not post_id:
                             continue
 
@@ -163,9 +171,21 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
                 found_new_this_pass = False
 
                 for post_elem in raw_elements:
+                    # نتفادى إعادة معالجة نفس العنصر (وبالتالي إعادة استدعاء Gemini Vision
+                    # عليه من جديد) بمرور سكرول لاحق — العنصر بيضل موجود بالـ DOM حتى
+                    # بعد ما نكون عالجناه، فبنعلّمه بـ dataset attribute بعد أول معالجة
+                    # ونتحقق من العلامة *قبل* ما نستدعي parser.parse() المكلفة.
+                    already_processed = await post_elem.evaluate(
+                        "el => el.dataset.fbMonitorSeen === '1'"
+                    )
+                    if already_processed:
+                        continue
+
                     post_id, text, post_url, img_url, has_video = await parser.parse(
                         post_elem, target_type, target_url, http_session
                     )
+                    await post_elem.evaluate("el => { el.dataset.fbMonitorSeen = '1'; }")
+
                     if not post_id or post_id in seen_in_run:
                         continue
 
