@@ -46,6 +46,8 @@ jobs:
           SCROLL_EMPTY_PASS_TOLERANCE: "4"
           SCROLL_PRESSES_PER_PASS: "3"
           SCROLL_WAIT_MS: "3500"
+          # تشخيص مؤقت — بيلتقط سكرين شوت من الصفحة زي ما فيسبوك رجعها فعلياً
+          DEBUG_SCREENSHOT: "true"
           GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
           GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
           GEMINI_API_KEY_4: ${{ secrets.GEMINI_API_KEY_4 }}
@@ -58,3 +60,12 @@ jobs:
           FB_AUTH_STATE_JSON: ${{ secrets.FB_AUTH_STATE_JSON }}
         # التعديل هنا لتشغيل الـ main.py الجديد
         run: python main.py
+
+      - name: Upload debug screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: downloads/debug_*.png
+          if-no-files-found: ignore
+          retention-days: 3
