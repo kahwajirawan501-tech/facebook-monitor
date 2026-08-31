@@ -108,6 +108,19 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
 
         page = await context.new_page()
         found_any_new = False
+
+        import os as _os
+        debug_network = _os.environ.get("DEBUG_NETWORK", "false").lower() in ("1", "true", "yes")
+        _graphql_log = []
+        if debug_network:
+            def _on_response(resp):
+                try:
+                    if "graphql" in resp.url.lower():
+                        _graphql_log.append((resp.status, resp.url[:120]))
+                except Exception:
+                    pass
+            page.on("response", _on_response)
+
         try:
             logger.info(f"🔄 [Start Check]: {target_url}")
             await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
@@ -235,6 +248,18 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
                 for _ in range(scroll_presses_per_pass):
                     await page.keyboard.press("PageDown")
                 await page.wait_for_timeout(scroll_wait_ms)
+
+            if debug_network:
+                if not _graphql_log:
+                    logger.warning(f"🌐 [DEBUG_NETWORK] ولا طلب GraphQL واحد انبعت أثناء السكرول لـ {target_url}!")
+                else:
+                    status_counts = {}
+                    for status, _url in _graphql_log:
+                        status_counts[status] = status_counts.get(status, 0) + 1
+                    logger.info(f"🌐 [DEBUG_NETWORK] عدد طلبات GraphQL أثناء السكرول: {len(_graphql_log)} | تفصيل الحالات: {status_counts}")
+                    failed = [u for s, u in _graphql_log if s >= 400]
+                    for u in failed[:5]:
+                        logger.warning(f"🌐 [DEBUG_NETWORK] طلب فاشل: {u}")
 
             if _os.environ.get("DEBUG_SCREENSHOT", "false").lower() in ("1", "true", "yes"):
                 try:
