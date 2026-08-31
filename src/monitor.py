@@ -95,7 +95,13 @@ async def dismiss_dialogs(page, close_selectors: list[str]):
             pass
 
 
-async def monitor_target(context, target_url, semaphore, http_session, *, db, telegram, parser, selectors, health, logger):
+async def monitor_target(context, target_url, semaphore, http_session, *, db, telegram, parser, selectors, health, logger, scroll_config=None):
+    scroll_config = scroll_config or {}
+    max_scroll_passes = scroll_config.get("max_scroll_passes", 15)
+    empty_pass_tolerance = scroll_config.get("empty_pass_tolerance", 2)
+    scroll_presses_per_pass = scroll_config.get("scroll_presses_per_pass", 2)
+    scroll_wait_ms = scroll_config.get("scroll_wait_ms", 2500)
+
     async with semaphore:
         target_type = detect_target_type(target_url)
         first_run = await db.is_empty_for_target(target_url)
@@ -149,8 +155,9 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
                 return
 
             seen_in_run = set()
+            consecutive_empty_passes = 0
 
-            for _scroll_pass in range(5):
+            for _scroll_pass in range(max_scroll_passes):
                 raw_elements, _ = await find_post_elements(page, container_selectors, logger)
 
                 found_new_this_pass = False
@@ -183,11 +190,19 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
                     if is_new:
                         await telegram.send_post(http_session, page_title, text, post_url, img_url, has_video)
 
+                # ما منوقف السكرول بمجرد أول مرور "فاضي" — فيسبوك ممكن يكون لسا عم يحمّل
+                # منشورات جديدة (lazy load) وياخد وقت أطول من مرور واحد. منعطيه
+                # `empty_pass_tolerance` مرات متتالية بلا جديد قبل ما نعتبرها نهاية فعلية.
                 if not found_new_this_pass:
-                    break
+                    consecutive_empty_passes += 1
+                    if consecutive_empty_passes >= empty_pass_tolerance:
+                        break
+                else:
+                    consecutive_empty_passes = 0
 
-                await page.keyboard.press("PageDown")
-                await page.wait_for_timeout(2000)
+                for _ in range(scroll_presses_per_pass):
+                    await page.keyboard.press("PageDown")
+                await page.wait_for_timeout(scroll_wait_ms)
 
         except Exception as e:
             logger.error(f"❌ Error while monitoring {target_url}: {e}")
