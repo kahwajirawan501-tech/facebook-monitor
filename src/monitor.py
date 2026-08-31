@@ -116,7 +116,11 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
             def _on_response(resp):
                 try:
                     if "graphql" in resp.url.lower():
-                        _graphql_log.append((resp.status, resp.url[:120]))
+                        try:
+                            content_length = resp.headers.get("content-length", "?")
+                        except Exception:
+                            content_length = "?"
+                        _graphql_log.append((resp.status, content_length, resp.url[:120]))
                 except Exception:
                     pass
             page.on("response", _on_response)
@@ -254,10 +258,13 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
                     logger.warning(f"🌐 [DEBUG_NETWORK] ولا طلب GraphQL واحد انبعت أثناء السكرول لـ {target_url}!")
                 else:
                     status_counts = {}
-                    for status, _url in _graphql_log:
+                    for status, _cl, _url in _graphql_log:
                         status_counts[status] = status_counts.get(status, 0) + 1
-                    logger.info(f"🌐 [DEBUG_NETWORK] عدد طلبات GraphQL أثناء السكرول: {len(_graphql_log)} | تفصيل الحالات: {status_counts}")
-                    failed = [u for s, u in _graphql_log if s >= 400]
+                    sizes = [int(cl) for _s, cl, _u in _graphql_log if str(cl).isdigit()]
+                    logger.info(f"🌐 [DEBUG_NETWORK] عدد طلبات GraphQL: {len(_graphql_log)} | الحالات: {status_counts}")
+                    if sizes:
+                        logger.info(f"🌐 [DEBUG_NETWORK] أحجام الردود (بايت) — أصغر: {min(sizes)} | أكبر: {max(sizes)} | كلها: {sorted(sizes)}")
+                    failed = [u for s, _cl, u in _graphql_log if s >= 400]
                     for u in failed[:5]:
                         logger.warning(f"🌐 [DEBUG_NETWORK] طلب فاشل: {u}")
 
