@@ -113,6 +113,18 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
             await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(4000)
 
+            # ★ تشخيص مؤقت: نلتقط سكرين شوت فعلي من الصفحة زي ما فيسبوك رجعها
+            # للجلسة الآلية — عشان نتأكد هل عم يرجع الفيد الكامل ولا نسخة مقيّدة
+            # (شكل شائع لما فيسبوك بيكشف إنو المتصفح Playwright headless).
+            import os as _os
+            if _os.environ.get("DEBUG_SCREENSHOT", "false").lower() in ("1", "true", "yes"):
+                try:
+                    safe_name = detect_target_type(target_url) + "_" + str(abs(hash(target_url)))[:8]
+                    await page.screenshot(path=f"downloads/debug_{safe_name}.png", full_page=True)
+                    logger.info(f"📸 Debug screenshot saved for {target_url}")
+                except Exception as shot_err:
+                    logger.warning(f"⚠️ فشل التقاط سكرين شوت تشخيصي: {shot_err}")
+
             await dismiss_dialogs(page, selectors["close_dialog_buttons"])
 
             await page.keyboard.press("PageDown")
