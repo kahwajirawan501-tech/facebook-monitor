@@ -48,6 +48,9 @@ jobs:
           SCROLL_WAIT_MS: "3500"
           # تشخيص مؤقت — بيلتقط سكرين شوت من الصفحة زي ما فيسبوك رجعها فعلياً
           DEBUG_SCREENSHOT: "true"
+          # تشخيص مؤقت — بيحفظ الـ HTML الخام للصفحة بعد السكرول (عشان نعرف
+          # بنية الـ DOM الحقيقية للمنشورات اليوم ونصلّح الـ selectors عليها)
+          DEBUG_HTML: "true"
           # تشخيص مؤقت — بيراقب طلبات GraphQL (تحميل المزيد) أثناء السكرول
           DEBUG_NETWORK: "true"
           GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
@@ -68,6 +71,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: debug-screenshots
-          path: downloads/debug_*.png
+          path: |
+            downloads/debug_*.png
+            downloads/debug_*.html
           if-no-files-found: ignore
           retention-days: 3
