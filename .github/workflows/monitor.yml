@@ -2,12 +2,12 @@ name: Facebook Early-Alert Monitor
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/10 * * * *"
   workflow_dispatch: {}
 
 concurrency:
   group: facebook-monitor
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   run-monitor:
