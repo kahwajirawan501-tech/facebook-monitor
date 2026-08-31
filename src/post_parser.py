@@ -187,7 +187,7 @@ class PostParser:
             if len(post_lines) > 0 and (hashtag_lines / len(post_lines) >= 0.5 or len(real_post_text) < 25):
                 is_mostly_hashtags = True
 
-        needs_gemini = image_url and (not real_post_text or is_mostly_hashtags or is_only_link)
+        needs_gemini = image_url and not has_video and (not real_post_text or is_mostly_hashtags or is_only_link)
 
         if needs_gemini:
             self.logger.info("👁️ المنشور يحتاج إلى استخراج النص من الصورة، جاري القراءة عبر Gemini Vision...")
