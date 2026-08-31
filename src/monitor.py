@@ -302,6 +302,21 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
                 except Exception as shot_err:
                     logger.warning(f"⚠️ فشل التقاط سكرين شوت تشخيصي: {shot_err}")
 
+            # ★ تشخيص مؤقت: نحفظ الـ HTML الفعلي للصفحة (page.content()) في هالنقطة —
+            # بعد كل السكرول — عشان نشوف بنية الـ DOM الحقيقية لمنشور حقيقي (مش سكرين شوت
+            # بصري، نص HTML خام نقدر نبحث فيه عن الـ tag/attributes الحقيقية اليوم).
+            if _os.environ.get("DEBUG_HTML", "false").lower() in ("1", "true", "yes"):
+                try:
+                    safe_name = detect_target_type(target_url) + "_" + str(abs(hash(target_url)))[:8]
+                    html_content = await page.content()
+                    with open(f"downloads/debug_{safe_name}_dom.html", "w", encoding="utf-8") as _f:
+                        _f.write(html_content)
+                    logger.info(
+                        f"📄 Debug HTML saved for {target_url} ({len(html_content)} chars)"
+                    )
+                except Exception as html_err:
+                    logger.warning(f"⚠️ فشل حفظ HTML تشخيصي: {html_err}")
+
         except Exception as e:
             logger.error(f"❌ Error while monitoring {target_url}: {e}")
         finally:
