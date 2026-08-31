@@ -255,10 +255,15 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
                 # ما منوقف السكرول بمجرد أول مرور "فاضي" — فيسبوك ممكن يكون لسا عم يحمّل
                 # منشورات جديدة (lazy load) وياخد وقت أطول من مرور واحد. منعطيه
                 # `empty_pass_tolerance` مرات متتالية بلا جديد قبل ما نعتبرها نهاية فعلية.
+                # ملاحظة: هاد السطر مقصود يكون إنجليزي بالكامل (ASCII فقط) بدون خلط عربي/أرقام.
+                # لما بيكون فيه عربي وأرقام بنفس السطر، متصفح اللوج (GitHub Actions مثلاً) بيطبّق
+                # bidi reordering فبيبعثر ترتيب الأرقام بالنسبة لعناوينها، وبيصير الرقم المعروض
+                # ما إلو أي علاقة موثوقة بمكانه البصري. خلينا ASCII صافي هون عشان الأرقام تضل دقيقة.
+                _dbg_valid_id = _dbg_total - _dbg_already_seen - _dbg_rejected_no_id
                 logger.info(
-                    f"🔍 [DEBUG_PASS {_scroll_pass + 1}] عناصر موجودة: {_dbg_total} | "
-                    f"معالجة مسبقاً: {_dbg_already_seen} | مرفوضة (مش منشور حقيقي): {_dbg_rejected_no_id} | "
-                    f"جديدة هالمرور: {found_new_this_pass}"
+                    f"[DEBUG_PASS {_scroll_pass + 1}] total_found={_dbg_total} "
+                    f"already_seen={_dbg_already_seen} rejected_no_id={_dbg_rejected_no_id} "
+                    f"got_valid_id={_dbg_valid_id} new_this_pass={found_new_this_pass}"
                 )
                 if not found_new_this_pass:
                     consecutive_empty_passes += 1
