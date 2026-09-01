@@ -20,6 +20,26 @@ class PostParser:
         self.logger = logger
 
     async def parse(self, post_element, target_type: str, target_url: str, http_session):
+        """غلاف تسلسلي رفيع فوق extract_pre_ocr()/finalize() — محفوظ للتوافق
+        الخلفي (مستخدم بمسار baseline الأول). بيستنى Gemini Vision بشكل تسلسلي
+        لو احتاجه البوست. المسار الرئيسي بحلقة السكرول بـ monitor.py بيستخدم
+        extract_pre_ocr()/finalize() منفصلين عشان يقدر يجمّع كل استدعاءات OCR
+        لنفس المرور ويبعتهم بالتوازي عبر asyncio.gather()."""
+        pre = await self.extract_pre_ocr(post_element, target_type, target_url, http_session)
+        if not pre["needs_ocr"]:
+            return pre["result"]
+        ocr_text = await self.ocr.extract_text_from_image_url(http_session, pre["image_url"])
+        return self.finalize(pre["state"], ocr_text)
+
+    async def extract_pre_ocr(self, post_element, target_type: str, target_url: str, http_session):
+        """يعمل كل استخراج/تحليل DOM يلي ما بيحتاج شبكة (ولا يستدعي Gemini Vision
+        إطلاقاً)، ويرجّع dict:
+        - {"needs_ocr": False, "result": (post_id, text, post_url, image_url, has_video)}
+          لو البوست جاهز فوراً (منرفوض أو ما محتاج صورة OCR).
+        - {"needs_ocr": True, "image_url": ..., "state": {...}} لو محتاج Gemini Vision —
+          استدعِ finalize(state, ocr_text) بعد ما يجهز نص الـ OCR (ممكن بالتوازي مع
+          بوستات تانية عبر asyncio.gather() على extract_text_from_image_url).
+        """
         s = self.selectors
 
         is_valid = await post_element.evaluate(
@@ -57,7 +77,7 @@ class PostParser:
         )
         if not is_valid:
             self.logger.info("[PARSE_REJECT] reason=not_valid_container (comment/composer/inside-ul/ignored-heading)")
-            return None, None, None, None, False
+            return {"needs_ocr": False, "result": (None, None, None, None, False)}
 
         await post_element.evaluate(
             """
@@ -184,7 +204,7 @@ class PostParser:
                 f"[PARSE_REJECT] reason=no_matching_post_link total_links={len(all_links)} "
                 f"sample_hrefs={_hrefs_sample}"
             )
-            return None, None, None, None, False
+            return {"needs_ocr": False, "result": (None, None, None, None, False)}
 
         has_video = await post_element.evaluate(
             """
@@ -219,10 +239,26 @@ class PostParser:
         needs_gemini = image_url and not has_video and (not real_post_text or is_mostly_hashtags or is_only_link)
 
         if needs_gemini:
-            self.logger.info("👁️ المنشور يحتاج إلى استخراج النص من الصورة، جاري القراءة عبر Gemini Vision...")
-            ocr_text = await self.ocr.extract_text_from_image_url(http_session, image_url)
-            clean_post_text = ocr_text if ocr_text else (real_post_text if real_post_text else "[منشور يحتوي على صورة]")
-        elif len(real_post_text) >= 15 and not is_only_link:
+            # ★ ما منستدعي Gemini Vision هون مباشرة — هاد بالضبط الاستدعاء اللي كان
+            # عم يوقف حلقة السكرول كاملة (blocking) لحد ما يرد. بدل هيك، منرجّع
+            # الحالة اللازمة للقرار النهائي، ومنترك لـ monitor.py يجمع كل البوستات
+            # يلي محتاجة OCR بنفس المرور ويبعتهم مع بعض بالتوازي عبر asyncio.gather()
+            # (شوف finalize() تحت لاستكمال القرار بعد ما يجهز نص الـ OCR).
+            self.logger.info("👁️ المنشور يحتاج إلى استخراج النص من الصورة عبر Gemini Vision (بانتظار الدفعة المتوازية)...")
+            return {
+                "needs_ocr": True,
+                "image_url": image_url,
+                "state": {
+                    "image_url": image_url,
+                    "has_video": has_video,
+                    "real_post_text": real_post_text,
+                    "is_only_link": is_only_link,
+                    "post_url": post_url,
+                    "target_url": target_url,
+                },
+            }
+
+        if len(real_post_text) >= 15 and not is_only_link:
             clean_post_text = real_post_text
         elif has_video:
             clean_post_text = real_post_text if real_post_text and not is_only_link else "[بث مباشر / مقطع فيديو]"
@@ -233,17 +269,34 @@ class PostParser:
                 f"[PARSE_REJECT] reason=empty_text_no_image_no_video image_url={bool(image_url)} "
                 f"has_video={has_video} raw_text_len={len(clean_post_text or '')}"
             )
-            return None, None, None, None, False
+            return {"needs_ocr": False, "result": (None, None, None, None, False)}
 
+        post_id = self._compute_post_id(post_url, image_url, clean_post_text, target_url)
+        return {"needs_ocr": False, "result": (post_id, clean_post_text, post_url, image_url, has_video)}
+
+    def finalize(self, state: dict, ocr_text: str):
+        """يكمّل القرار النهائي لبوست كان محتاج Gemini Vision (needs_ocr=True من
+        extract_pre_ocr)، بعد ما يجهز نص الـ OCR — سواء انبعت لحاله أو ضمن دفعة
+        متوازية عبر asyncio.gather()."""
+        image_url = state["image_url"]
+        has_video = state["has_video"]
+        real_post_text = state["real_post_text"]
+        post_url = state["post_url"]
+        target_url = state["target_url"]
+
+        clean_post_text = ocr_text if ocr_text else (real_post_text if real_post_text else "[منشور يحتوي على صورة]")
+        post_id = self._compute_post_id(post_url, image_url, clean_post_text, target_url)
+        return post_id, clean_post_text, post_url, image_url, has_video
+
+    @staticmethod
+    def _compute_post_id(post_url, image_url, clean_post_text, target_url):
         fb_id = extract_facebook_post_id(post_url)
         if not fb_id and image_url:
             fb_id = extract_facebook_post_id(image_url)
 
         if fb_id:
-            post_id = fb_id
-        else:
-            normalized_text = re.sub(r"[^ء-يa-zA-Z0-9]", "", clean_post_text).strip().lower()
-            unique_seed = f"{target_url}|{normalized_text[:120]}"
-            post_id = hashlib.md5(unique_seed.encode("utf-8")).hexdigest()
+            return fb_id
 
-        return post_id, clean_post_text, post_url, image_url, has_video
+        normalized_text = re.sub(r"[^ء-يa-zA-Z0-9]", "", clean_post_text).strip().lower()
+        unique_seed = f"{target_url}|{normalized_text[:120]}"
+        return hashlib.md5(unique_seed.encode("utf-8")).hexdigest()
