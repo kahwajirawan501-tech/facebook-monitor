@@ -52,7 +52,7 @@
     "/videos/", "/reel/", "/watch", "/live/", "l.facebook.com"
   ],
 
-  "post_link_skip_keywords": ["comment_id", "reply_comment_id", "/user/", "/friends/"],
+  "post_link_skip_keywords": ["comment_id", "reply_comment_id", "/user/", "/friends/", "/hashtag/"],
 
   "video_indicators": {
     "css": ["video", "[data-video-id]", "[aria-label*='تشغيل']", "[aria-label*='Play']"],
