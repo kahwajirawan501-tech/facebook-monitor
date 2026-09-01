@@ -4,6 +4,8 @@
 متتالية لإرسال تنبيه لو فيسبوك غيّر بنيته وكسر الاستخراج.
 """
 
+import asyncio
+
 from .url_utils import detect_target_type
 
 
@@ -299,11 +301,12 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
                 _dbg_already_seen = 0
                 _dbg_rejected_no_id = 0
 
+                # المرحلة 1: نطلع كل معلومات ما قبل OCR لكل عناصر هالمرور (بدون ما
+                # نستنى Gemini Vision لحدا)، ونعلّم كل عنصر كـ "معالج" فوراً بعد
+                # extract_pre_ocr() (مش بعد OCR) — عشان لو مرور لاحق شافو تاني ما
+                # يعيد استدعاء extract_pre_ocr() عليه من جديد.
+                pending = []  # [(post_elem, pre_result_dict), ...] بترتيب ظهورها بالصفحة
                 for post_elem in raw_elements:
-                    # نتفادى إعادة معالجة نفس العنصر (وبالتالي إعادة استدعاء Gemini Vision
-                    # عليه من جديد) بمرور سكرول لاحق — العنصر بيضل موجود بالـ DOM حتى
-                    # بعد ما نكون عالجناه، فبنعلّمه بـ dataset attribute بعد أول معالجة
-                    # ونتحقق من العلامة *قبل* ما نستدعي parser.parse() المكلفة.
                     already_processed = await post_elem.evaluate(
                         "el => el.dataset.fbMonitorSeen === '1'"
                     )
@@ -311,10 +314,53 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
                         _dbg_already_seen += 1
                         continue
 
-                    post_id, text, post_url, img_url, has_video = await parser.parse(
+                    pre_result = await parser.extract_pre_ocr(
                         post_elem, target_type, target_url, http_session
                     )
                     await post_elem.evaluate("el => { el.dataset.fbMonitorSeen = '1'; }")
+                    pending.append((post_elem, pre_result))
+
+                # المرحلة 2: نجمع كل البوستات يلي طلعت needs_ocr=True (محتاجة Gemini
+                # Vision) ونبعتهم كلهم مع بعض بـ asyncio.gather() بدل واحد وراء التاني.
+                # GeminiOCR._acquire_key_index() بيوزّعهم تلقائياً على المفاتيح الأربعة
+                # (round-robin)، فمنستفيد فعلياً من التوازي بدل ما كلهم يتزاحموا عالمفتاح
+                # الأول. هاد هو الإصلاح الأساسي لمشكلة "حلقة المعالجة بتوقف الكون كامل
+                # لحد ما Gemini يرد" — كانت آخذة ~83% من وقت الدورة بشكل تسلسلي.
+                ocr_targets = [
+                    (idx, state["image_url"])
+                    for idx, (_elem, state) in enumerate(pending)
+                    if state["needs_ocr"]
+                ]
+                ocr_by_index: dict[int, str] = {}
+                if ocr_targets:
+                    logger.info(
+                        f"👁️ {len(ocr_targets)} منشور يحتاج Gemini Vision بهالمرور — "
+                        f"جاري إرسالهم بالتوازي (موزّعين على {len(parser.ocr.api_keys)} مفاتيح)..."
+                    )
+                    ocr_results = await asyncio.gather(
+                        *[
+                            parser.ocr.extract_text_from_image_url(http_session, img_url)
+                            for _idx, img_url in ocr_targets
+                        ],
+                        return_exceptions=True,
+                    )
+                    for (idx, _img_url), ocr_res in zip(ocr_targets, ocr_results):
+                        if isinstance(ocr_res, Exception):
+                            logger.warning(f"⚠️ فشل Gemini Vision لمنشور رقم {idx} بهالمرور: {ocr_res}")
+                            ocr_by_index[idx] = ""
+                        else:
+                            ocr_by_index[idx] = ocr_res
+
+                # المرحلة 3: نكمّل القرار النهائي (finalize) ونحفظ/نرسل — بنفس الترتيب
+                # الأصلي يلي ظهرت فيه البوستات بالصفحة (مهم لـ seen_in_run والـ dedupe).
+                for idx, (post_elem, pre_result) in enumerate(pending):
+                    if pre_result["needs_ocr"]:
+                        ocr_text = ocr_by_index.get(idx, "")
+                        post_id, text, post_url, img_url, has_video = parser.finalize(
+                            pre_result["state"], ocr_text
+                        )
+                    else:
+                        post_id, text, post_url, img_url, has_video = pre_result["result"]
 
                     if not post_id:
                         _dbg_rejected_no_id += 1
