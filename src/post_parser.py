@@ -4,6 +4,7 @@
 بيصير بتعديل selectors.json فقط، بدون لمس هالملف.
 """
 
+import asyncio
 import hashlib
 import json
 import re
@@ -143,17 +144,32 @@ class PostParser:
             """
         )
 
+        async def _scan_links_for_post_url(links):
+            for link in links:
+                href = await link.get_attribute("href") or ""
+                if any(keyword in href for keyword in s.get("post_link_keywords", [])):
+                    if not any(skip in href for skip in s.get("post_link_skip_keywords", [])):
+                        raw_url = f"https://www.facebook.com{href}" if href.startswith("/") else href
+                        return clean_facebook_url(raw_url)
+            return None
+
         all_links = await post_element.query_selector_all("a[href]")
         post_url = target_url
-        found_specific_link = False
-        for link in all_links:
-            href = await link.get_attribute("href") or ""
-            if any(keyword in href for keyword in s.get("post_link_keywords", [])):
-                if not any(skip in href for skip in s.get("post_link_skip_keywords", [])):
-                    raw_url = f"https://www.facebook.com{href}" if href.startswith("/") else href
-                    post_url = clean_facebook_url(raw_url)
-                    found_specific_link = True
-                    break
+        found_url = await _scan_links_for_post_url(all_links)
+
+        # ★ محاولة ثانية: فيسبوك أحياناً بيحقن الـ href الحقيقي على الرابط متأخر شوي
+        # (lazy hydration) — أول مسح ممكن يلاقي بس "#" أو "?__cft__..." مؤقتة، وبعد
+        # جزء من الثانية يصير الرابط الحقيقي (/posts/pfbid...) موجود. قبل ما نعتبره
+        # مرفوض نهائياً، ننتظر شوي ونعيد المسح مرة وحدة (يعيد query_selector_all كمان
+        # لأنو ممكن تنضاف/تتحدث عناصر <a> جديدة كلياً مش بس تتغيّر).
+        if not found_url:
+            await asyncio.sleep(0.45)
+            all_links = await post_element.query_selector_all("a[href]")
+            found_url = await _scan_links_for_post_url(all_links)
+
+        found_specific_link = found_url is not None
+        if found_specific_link:
+            post_url = found_url
 
         if not found_specific_link:
             try:
