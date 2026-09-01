@@ -6,6 +6,30 @@
 
 from .url_utils import detect_target_type
 
+
+async def _scroll_down(page, target_type: str, presses: int, wait_ms: int):
+    """يعمل سكرول فعلي بمسافة بكسل ثابتة (mouse.wheel) بدل الاعتماد على PageDown.
+
+    ★ السبب: صفحات البروفايل/التايم لاين بفيسبوك بتستخدم virtualization —
+    فيسبوك بيجيب بيانات البوست (GraphQL) مسبقاً كـ prefetch جوا <script data-sjs>
+    بس ما بيرندره فعلياً كعنصر DOM حقيقي إلا لما يقترب منه الـ scroll فعلياً
+    (intersection observer). PageDown بيعتمد على ارتفاع الـ viewport اللحظي
+    وممكن ياخد "تقطيعة" سكرول أصغر من المتوقع، فما يكفي لتحفيز الرندر. mouse.wheel
+    بمسافة بكسل صريحة أكثر ثباتاً، وبنزيدها كمان لصفحات البروفايل تحديداً لأنو
+    التجربة أثبتت إنها أبطأ بالتحميل من صفحات الفيد العادية.
+    """
+    distance = 1800 if target_type == "PROFILE" else 1200
+    for _ in range(presses):
+        await page.mouse.wheel(0, distance)
+        await page.wait_for_timeout(300)
+    # هزّة بسيطة لفوق وتحت بعد آخر دفعة — بعض تطبيقات الـ virtualization
+    # بتحتاج تغيّر باتجاه السكرول (مش بس مسافة) عشان تطلق intersection event جديد.
+    await page.mouse.wheel(0, -200)
+    await page.wait_for_timeout(200)
+    await page.mouse.wheel(0, 200)
+    await page.wait_for_timeout(wait_ms)
+
+
 class HealthTracker:
     """يتتبع عدد الدورات الفارغة المتتالية لكل هدف، ويقرر متى يجب التنبيه."""
 
@@ -207,8 +231,7 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
 
             await dismiss_dialogs(page, selectors["close_dialog_buttons"])
 
-            await page.keyboard.press("PageDown")
-            await page.wait_for_timeout(2000)
+            await _scroll_down(page, target_type, presses=1, wait_ms=2000)
 
             page_title = await detect_page_title(page, selectors)
             if not page_title or page_title in selectors["page_title_excluded_texts"]:
@@ -255,8 +278,7 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
 
                     if saved_initial >= 2:
                         break
-                    await page.keyboard.press("PageDown")
-                    await page.wait_for_timeout(2000)
+                    await _scroll_down(page, target_type, presses=1, wait_ms=2000)
 
                 logger.info(f"✅ Baseline established ({saved_initial} posts) for: {page_title}")
                 found_any_new = saved_initial > 0
@@ -341,9 +363,8 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
                 else:
                     consecutive_empty_passes = 0
 
-                for _ in range(scroll_presses_per_pass):
-                    await page.keyboard.press("PageDown")
-                await page.wait_for_timeout(scroll_wait_ms)
+                pass_wait_ms = int(scroll_wait_ms * 1.5) if target_type == "PROFILE" else scroll_wait_ms
+                await _scroll_down(page, target_type, presses=scroll_presses_per_pass, wait_ms=pass_wait_ms)
 
             if debug_network:
                 await page.wait_for_timeout(1500)  # نعطي فرصة لمهام قراءة محتوى الردود (async) تخلص
