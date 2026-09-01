@@ -43,7 +43,7 @@ jobs:
           # إعدادات السكرول: كمل سكرول لحد ما يوصل لآخر منشور جديد فعلاً،
           # مش يوقف بسرعة لمجرد إنو فيسبوك تأخر بالتحميل لحظة وحدة.
           MAX_SCROLL_PASSES: "30"
-          SCROLL_EMPTY_PASS_TOLERANCE: "4"
+          SCROLL_EMPTY_PASS_TOLERANCE: "10"
           SCROLL_PRESSES_PER_PASS: "3"
           SCROLL_WAIT_MS: "3500"
           # تشخيص مؤقت — بيلتقط سكرين شوت من الصفحة زي ما فيسبوك رجعها فعلياً
