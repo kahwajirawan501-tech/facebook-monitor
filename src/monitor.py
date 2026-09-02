@@ -359,6 +359,13 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
                                 "needs_ocr": False,
                                 "result": (_early_id, None, None, None, False),
                             }
+                        elif not _early_id:
+                            # ★ تشخيص مؤقت: لو ما قدرنا نستخرج معرّف من الرابط إطلاقاً،
+                            # منطبع الرابط نفسه عشان نعرف بالضبط أي صيغة رابط فيسبوك
+                            # حالية مش مغطاة بـ extract_facebook_post_id() (مثلاً روابط
+                            # /share/p/ الجديدة). هاد بيفسر ليش الـ early-exit ما بيشتغل
+                            # لبعض البوستات رغم إنها موجودة أصلاً بقاعدة البيانات.
+                            logger.info(f"[DEBUG_EARLY_ID_MISS] post_url={_st['post_url'][:120]!r}")
 
                     pending.append((post_elem, pre_result))
 
