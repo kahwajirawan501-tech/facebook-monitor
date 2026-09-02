@@ -1,0 +1,28 @@
+# مثال ملف systemd لتشغيل main.py كخدمة دائمة على VM مجاني (Oracle Always Free
+# مثلاً) أو جهاز شخصي — بدل الاعتماد على cron ثابت بـ GitHub Actions.
+# main.py أصلاً فيه حلقة `while True` مع فاصل عشوائي (CHECK_INTERVAL_MIN/MAX_SECONDS)،
+# فمش محتاج أي جدولة خارجية إطلاقاً — الخدمة بتضل شغالة وبتراقب بنفسها.
+#
+# طريقة التثبيت (على Ubuntu/Debian):
+#   1. عدّل المسارات (WorkingDirectory, ExecStart, User) تحت لتطابق سيرفرك.
+#   2. sudo cp deploy/facebook-monitor.service /etc/systemd/system/
+#   3. sudo systemctl daemon-reload
+#   4. sudo systemctl enable --now facebook-monitor
+#   5. متابعة اللوج: journalctl -u facebook-monitor -f
+
+[Unit]
+Description=Facebook Early-Alert Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=youruser
+WorkingDirectory=/home/youruser/facebook-monitor
+EnvironmentFile=/home/youruser/facebook-monitor/.env
+ExecStart=/home/youruser/facebook-monitor/.venv/bin/python main.py
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
