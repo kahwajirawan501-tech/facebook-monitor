@@ -187,6 +187,13 @@ class PostParser:
             all_links = await post_element.query_selector_all("a[href]")
             found_url = await _scan_links_for_post_url(all_links)
 
+        # ★ محاولة ثالثة بفاصل أطول: بوستات "المشاركة" (شير) عندها بوست مضمّن
+        # جوا بعضه (بوست أصلي + بوست الشير) فبتاخد وقت أطول تحمّل/تتحقّن كل روابطها.
+        if not found_url:
+            await asyncio.sleep(1.2)
+            all_links = await post_element.query_selector_all("a[href]")
+            found_url = await _scan_links_for_post_url(all_links)
+
         found_specific_link = found_url is not None
         if found_specific_link:
             post_url = found_url
@@ -194,7 +201,7 @@ class PostParser:
         if not found_specific_link:
             try:
                 _hrefs_sample = []
-                for link in all_links[:8]:
+                for link in all_links[:30]:
                     _h = await link.get_attribute("href") or ""
                     if _h:
                         _hrefs_sample.append(_h[:80])
