@@ -5,6 +5,7 @@
 
 import asyncio
 import os
+import time
 import uuid
 from urllib.parse import urljoin
 
@@ -54,21 +55,31 @@ class GeminiOCR:
         # "مفاتيح مستنفدة" مشتركة (429) نتجنبها بالاختيار بدل ما نلغيها نهائياً.
         self._key_lock = asyncio.Lock()
         self._next_key_index = 0
-        self._exhausted_keys: set[int] = set()
+        # ★ dict مش set: كل مفتاح مستنفد إله وقت انتهاء صلاحية الحظر (60 ثانية)،
+        # مش حظر دائم. 429 من Gemini هو rate-limit بالدقيقة وبيرجع يتاح تلقائياً
+        # بعد فترة قصيرة — لو ضلينا نتجنبه للأبد (زي ما كان بالكود القديم: set
+        # بدون أي إزالة)، أول ما الأربع مفاتيح ياخدوا 429 مرة وحدة بيصيروا
+        # "محظورين" طول عمر الدورة كلها، وكل استدعاء بعدها بيرجع يجرب عشوائياً
+        # ويوقع بـ 429 من جديد بدل ما يستخدم مفتاح رجع يصير متاح فعلياً.
+        self._exhausted_keys: dict[int, float] = {}
+        self._exhaustion_cooldown_s = 60.0
 
     def _client(self, key_index: int) -> genai.Client:
         return genai.Client(api_key=self.api_keys[key_index])
 
     async def _acquire_key_index(self) -> int:
         """يرجّع رقم مفتاح للاستدعاء الحالي، موزّع round-robin بين المفاتيح غير
-        المستنفدة. لو كل المفاتيح مستنفدة مؤقتاً (429)، منرجّع أي مفتاح ونجرب
-        عليه (ممكن تكون الحصة تجددت)."""
+        المستنفدة حالياً (أو يلي خلص وقت حظرها المؤقت). لو كل المفاتيح مستنفدة
+        فعلياً هالثانية، منرجّع أي مفتاح ونجرب عليه (ممكن تكون الحصة تجددت)."""
         async with self._key_lock:
+            now = time.monotonic()
             n = len(self.api_keys)
             for _ in range(n):
                 idx = self._next_key_index
                 self._next_key_index = (self._next_key_index + 1) % n
-                if idx not in self._exhausted_keys:
+                exhausted_at = self._exhausted_keys.get(idx)
+                if exhausted_at is None or (now - exhausted_at) >= self._exhaustion_cooldown_s:
+                    self._exhausted_keys.pop(idx, None)
                     return idx
             idx = self._next_key_index
             self._next_key_index = (self._next_key_index + 1) % n
@@ -76,7 +87,7 @@ class GeminiOCR:
 
     async def _mark_exhausted(self, key_index: int):
         async with self._key_lock:
-            self._exhausted_keys.add(key_index)
+            self._exhausted_keys[key_index] = time.monotonic()
 
     async def extract_text_from_image_url(self, session: aiohttp.ClientSession, image_url: str) -> str:
         if not image_url:
