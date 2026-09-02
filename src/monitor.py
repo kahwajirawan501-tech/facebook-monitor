@@ -5,12 +5,20 @@
 """
 
 import asyncio
+import random
 
 from .url_utils import detect_target_type
 
 
+def _jitter(value: float, spread: float = 0.2) -> float:
+    """يرجّع قيمة قريبة من value بس مش هي بالظبط — ±spread نسبة مئوية عشوائية.
+    مستخدمة لكسر أي رقم ثابت متكرر (مسافة سكرول، مدة انتظار...) لأنو التكرار
+    التام لنفس الرقم بكل مرة هو بصمة سلوكية آلية واضحة."""
+    return value * random.uniform(1 - spread, 1 + spread)
+
+
 async def _scroll_down(page, target_type: str, presses: int, wait_ms: int):
-    """يعمل سكرول فعلي بمسافة بكسل ثابتة (mouse.wheel) بدل الاعتماد على PageDown.
+    """يعمل سكرول فعلي بمسافة بكسل شبه ثابتة (mouse.wheel) بدل الاعتماد على PageDown.
 
     ★ السبب: صفحات البروفايل/التايم لاين بفيسبوك بتستخدم virtualization —
     فيسبوك بيجيب بيانات البوست (GraphQL) مسبقاً كـ prefetch جوا <script data-sjs>
@@ -19,17 +27,21 @@ async def _scroll_down(page, target_type: str, presses: int, wait_ms: int):
     وممكن ياخد "تقطيعة" سكرول أصغر من المتوقع، فما يكفي لتحفيز الرندر. mouse.wheel
     بمسافة بكسل صريحة أكثر ثباتاً، وبنزيدها كمان لصفحات البروفايل تحديداً لأنو
     التجربة أثبتت إنها أبطأ بالتحميل من صفحات الفيد العادية.
+
+    ★ الإضافة: كل رقم (مسافة، مدة انتظار) بيمر عبر `_jitter` بدل ما يكون ثابت
+    حرفياً بكل نداء — إنسان حقيقي ما بيعمل سكرول بنفس البكسل بالضبط ونفس
+    التوقيت كل مرة، فهاد بيقلل من تناسق النمط الآلي.
     """
-    distance = 1800 if target_type == "PROFILE" else 1200
+    base_distance = 1800 if target_type == "PROFILE" else 1200
     for _ in range(presses):
-        await page.mouse.wheel(0, distance)
-        await page.wait_for_timeout(300)
+        await page.mouse.wheel(0, _jitter(base_distance))
+        await page.wait_for_timeout(int(_jitter(300, 0.4)))
     # هزّة بسيطة لفوق وتحت بعد آخر دفعة — بعض تطبيقات الـ virtualization
     # بتحتاج تغيّر باتجاه السكرول (مش بس مسافة) عشان تطلق intersection event جديد.
-    await page.mouse.wheel(0, -200)
-    await page.wait_for_timeout(200)
-    await page.mouse.wheel(0, 200)
-    await page.wait_for_timeout(wait_ms)
+    await page.mouse.wheel(0, -int(_jitter(200, 0.3)))
+    await page.wait_for_timeout(int(_jitter(200, 0.4)))
+    await page.mouse.wheel(0, int(_jitter(200, 0.3)))
+    await page.wait_for_timeout(int(_jitter(wait_ms, 0.25)))
 
 
 class HealthTracker:
