@@ -49,7 +49,11 @@ class Config:
         self.GEMINI_MODEL = _get_env("GEMINI_MODEL", required=False, default="gemini-3.6-flash")
 
         self.MAX_CONCURRENT_TASKS = int(_get_env("MAX_CONCURRENT_TASKS", required=False, default="3"))
-        self.CHECK_INTERVAL_SECONDS = int(_get_env("CHECK_INTERVAL_SECONDS", required=False, default="120"))
+        # فاصل عشوائي بين دورتين (بدل رقم ثابت) — قلل الحد الأدنى/الأقصى لو
+        # بدك مراقبة أسرع، بس خلي بينهم مسافة معقولة (مش 90-95) عشان يضل
+        # فيه تنوّع حقيقي بالتوقيت.
+        self.CHECK_INTERVAL_MIN_SECONDS = int(_get_env("CHECK_INTERVAL_MIN_SECONDS", required=False, default="90"))
+        self.CHECK_INTERVAL_MAX_SECONDS = int(_get_env("CHECK_INTERVAL_MAX_SECONDS", required=False, default="240"))
         self.RUN_ONCE = _get_env("RUN_ONCE", required=False, default="false").lower() in ("1", "true", "yes")
         self.EMPTY_CYCLES_ALERT_THRESHOLD = int(
             _get_env("EMPTY_CYCLES_ALERT_THRESHOLD", required=False, default="5")
