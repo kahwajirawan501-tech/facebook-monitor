@@ -295,6 +295,12 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
             # منقلب الترتيب ونبعت الأقدم أول — هيك قناة التلغرام بتصير متل تايم لاين
             # طبيعي (الأقدم فوق، الأحدث تحت).
             posts_to_send = []
+            # ★ تحديد التوازي: بدل ما نطلق كل صور الباس (ممكن توصل 4) على Gemini
+            # بنفس اللحظة (وهاد اللي كان عم يسبب انفجار 429 من كل المفاتيح مرة
+            # وحدة رغم الـ round-robin)، منحدد حد أقصى صورتين مع بعض بأي لحظة.
+            # هيك بنستهلك حصة الـ RPM تدريجياً بدل ما نحرقها كلها بطلب واحد مجمّع.
+            ocr_concurrency_limit = 2
+            ocr_semaphore = asyncio.Semaphore(ocr_concurrency_limit)
 
             for _scroll_pass in range(max_scroll_passes):
                 raw_elements, _ = await find_post_elements(
@@ -342,13 +348,16 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
                 if ocr_targets:
                     logger.info(
                         f"👁️ {len(ocr_targets)} منشور يحتاج Gemini Vision بهالمرور — "
-                        f"جاري إرسالهم بالتوازي (موزّعين على {len(parser.ocr.api_keys)} مفاتيح)..."
+                        f"جاري إرسالهم بالتوازي (موزّعين على {len(parser.ocr.api_keys)} مفاتيح، "
+                        f"بحد أقصى {ocr_concurrency_limit} مع بعض بنفس اللحظة)..."
                     )
+
+                    async def _bounded_ocr(img_url):
+                        async with ocr_semaphore:
+                            return await parser.ocr.extract_text_from_image_url(http_session, img_url)
+
                     ocr_results = await asyncio.gather(
-                        *[
-                            parser.ocr.extract_text_from_image_url(http_session, img_url)
-                            for _idx, img_url in ocr_targets
-                        ],
+                        *[_bounded_ocr(img_url) for _idx, img_url in ocr_targets],
                         return_exceptions=True,
                     )
                     for (idx, _img_url), ocr_res in zip(ocr_targets, ocr_results):
