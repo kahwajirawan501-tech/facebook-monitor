@@ -7,7 +7,7 @@
 import asyncio
 import random
 
-from .url_utils import detect_target_type
+from .url_utils import detect_target_type, extract_facebook_post_id
 
 
 def _jitter(value: float, spread: float = 0.2) -> float:
@@ -343,6 +343,23 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
                         post_elem, target_type, target_url, http_session
                     )
                     await post_elem.evaluate("el => { el.dataset.fbMonitorSeen = '1'; }")
+
+                    if pre_result["needs_ocr"]:
+                        # ★ قبل ما نصرف استدعاء Gemini Vision (مكلف، محدود بالحصة، وبياخد
+                        # ~5+ ثواني)، نجرب نحسب معرّف البوست من الرابط نفسه بدون أي حاجة
+                        # لنص OCR — لو نجحنا ولقينا إنو البوست محفوظ أصلاً بقاعدة البيانات
+                        # من دورة سابقة (بوست قديم رجع ظهر بالفيد)، منتجاوز الـ OCR كلياً
+                        # بدل ما نعيد تحليل نفس الصورة من الصفر كل دورة لنفس البوست.
+                        _st = pre_result["state"]
+                        _early_id = extract_facebook_post_id(_st["post_url"]) or extract_facebook_post_id(
+                            _st["image_url"]
+                        )
+                        if _early_id and await db.post_exists(_early_id):
+                            pre_result = {
+                                "needs_ocr": False,
+                                "result": (_early_id, None, None, None, False),
+                            }
+
                     pending.append((post_elem, pre_result))
 
                 # المرحلة 2: نجمع كل البوستات يلي طلعت needs_ocr=True (محتاجة Gemini
