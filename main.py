@@ -4,10 +4,18 @@
 
 import asyncio
 import json
+import random
 import warnings
 
 import aiohttp
-from playwright.async_api import async_playwright
+
+try:
+    # patchright: بديل شبه متطابق لـ playwright بس بيرقّع أشهر نقاط كشف
+    # الأتمتة (navigator.webdriver, CDP leaks...). لو مو مثبّت، منرجع لـ
+    # playwright العادي تلقائياً بدون ما ينكسر شي.
+    from patchright.async_api import async_playwright
+except ImportError:
+    from playwright.async_api import async_playwright
 
 from src.config import Config
 from src.db import Database
@@ -99,8 +107,12 @@ async def run():
                         logger.info("🏁 RUN_ONCE=true → إنهاء التنفيذ بعد دورة واحدة.")
                         break
 
-                    logger.info(f"💤 Waiting {cfg.CHECK_INTERVAL_SECONDS}s before next cycle...")
-                    await asyncio.sleep(cfg.CHECK_INTERVAL_SECONDS)
+                    # ★ فاصل زمني عشوائي (مش رقم ثابت) — نمط تشغيل بفاصل ثابت
+                    # طول الوقت (كل 120 ثانية بالظبط مثلاً) هو نفسه توقيع سلوكي
+                    # سهل الكشف. منسحب رقم عشوائي بين حد أدنى وأقصى بكل دورة.
+                    wait_s = random.uniform(cfg.CHECK_INTERVAL_MIN_SECONDS, cfg.CHECK_INTERVAL_MAX_SECONDS)
+                    logger.info(f"💤 Waiting {wait_s:.0f}s (randomized) before next cycle...")
+                    await asyncio.sleep(wait_s)
     finally:
         await db.close()
         try:
