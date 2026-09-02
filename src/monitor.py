@@ -288,6 +288,13 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
 
             seen_in_run = set()
             consecutive_empty_passes = 0
+            # ★ بنجمع كل بوست جديد هون بدل ما نبعته فوراً — فيسبوك بيعرض الأحدث فوق
+            # الصفحة، فلو بعتنا أول ما نلقط (ترتيب الصفحة) رح توصل عالتلغرام
+            # الأحدث أول والأقدم آخر شي (معكوس). منجمعهم هون بترتيب الاكتشاف
+            # (فوق→تحت عبر كل الـ passes = أحدث→أقدم)، وبعد ما تخلص كل الـ passes
+            # منقلب الترتيب ونبعت الأقدم أول — هيك قناة التلغرام بتصير متل تايم لاين
+            # طبيعي (الأقدم فوق، الأحدث تحت).
+            posts_to_send = []
 
             for _scroll_pass in range(max_scroll_passes):
                 raw_elements, _ = await find_post_elements(
@@ -387,7 +394,7 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
                         await db.save_post(post_id, text, post_url, img_url, post_url if has_video else None, target_type, target_url)
 
                     if is_new:
-                        await telegram.send_post(http_session, page_title, text, post_url, img_url, has_video)
+                        posts_to_send.append((text, post_url, img_url, has_video))
 
                 # ما منوقف السكرول بمجرد أول مرور "فاضي" — فيسبوك ممكن يكون لسا عم يحمّل
                 # منشورات جديدة (lazy load) وياخد وقت أطول من مرور واحد. منعطيه
@@ -411,6 +418,14 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
 
                 pass_wait_ms = int(scroll_wait_ms * 1.5) if target_type == "PROFILE" else scroll_wait_ms
                 await _scroll_down(page, target_type, presses=scroll_presses_per_pass, wait_ms=pass_wait_ms)
+
+            # ★ هلق بعد ما خلصت كل الـ scroll passes، منبعت كل البوستات الجديدة يلي
+            # تجمّعت — بس بالترتيب المعكوس (الأقدم أول، الأحدث آخر شي) عشان يصير
+            # التسلسل بقناة التلغرام منطقي زمنياً.
+            if posts_to_send:
+                logger.info(f"📤 إرسال {len(posts_to_send)} منشور جديد بالترتيب الزمني الصحيح (الأقدم أولاً)...")
+                for text, post_url, img_url, has_video in reversed(posts_to_send):
+                    await telegram.send_post(http_session, page_title, text, post_url, img_url, has_video)
 
             if debug_network:
                 await page.wait_for_timeout(1500)  # نعطي فرصة لمهام قراءة محتوى الردود (async) تخلص
