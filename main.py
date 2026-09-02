@@ -14,8 +14,10 @@ try:
     # الأتمتة (navigator.webdriver, CDP leaks...). لو مو مثبّت، منرجع لـ
     # playwright العادي تلقائياً بدون ما ينكسر شي.
     from patchright.async_api import async_playwright
+    _BROWSER_ENGINE = "patchright"
 except ImportError:
     from playwright.async_api import async_playwright
+    _BROWSER_ENGINE = "playwright (patchright غير مثبّت)"
 
 from src.config import Config
 from src.db import Database
@@ -34,6 +36,7 @@ async def run():
     logger = setup_logger(log_dir=cfg.LOG_DIR, level=cfg.LOG_LEVEL)
 
     logger.info(f"⏳ Initializing Google GenAI Clients ({len(cfg.GEMINI_KEYS)} keys loaded)...")
+    logger.info(f"🕵️ Browser engine: {_BROWSER_ENGINE}")
     ocr = GeminiOCR(cfg.GEMINI_KEYS, cfg.GEMINI_MODEL, cfg.DOWNLOAD_DIR, logger)
     parser = PostParser(cfg.selectors, ocr, logger)
     telegram = TelegramClient(cfg.TELEGRAM_BOT_TOKEN, cfg.TELEGRAM_CHAT_ID, cfg.DOWNLOAD_DIR, logger)
