@@ -66,7 +66,7 @@ class HealthTracker:
         return False
 
 
-async def find_post_elements(page, container_selectors: list[str], logger, post_link_keywords=None, post_action_aria_prefixes=None):
+async def find_post_elements(page, container_selectors: list[str], logger, post_link_keywords=None, post_action_aria_prefixes=None, post_link_skip_keywords=None):
     """يجمع عناصر المنشورات الحقيقية.
 
     ★ الاستراتيجية الأساسية (جديدة): فيسبوك عاد بيستخدم role='feed' ولا role='article'
@@ -77,14 +77,26 @@ async def find_post_elements(page, container_selectors: list[str], logger, post_
     جداً (باللغة الإنجليزية، مش class مبهم بيتغيّر كل نشر جديد لفيسبوك).
 
     منطلق من هاد الـ anchor، منطلع بالشجرة لفوق (parentElement) خطوة خطوة لحد ما نلاقي
-    أول جد (ancestor) فيه رابط `<a href>` يطابق أحد `post_link_keywords` — هاد أول جد
-    منطقياً بيكون حدود المنشور الكامل (نص + صورة + شريط لايك/تعليق/مشاركة)، بغض النظر
-    عن أسماء الـ classes الداخلية يلي بتتغيّر.
+    أول جد (ancestor) فيه رابط `<a href>` يطابق أحد `post_link_keywords` **و مش مطابق
+    ولا وحدة من `post_link_skip_keywords`** — هاد أول جد منطقياً بيكون حدود المنشور
+    الكامل (نص + صورة + شريط لايك/تعليق/مشاركة)، بغض النظر عن أسماء الـ classes
+    الداخلية يلي بتتغيّر.
+
+    ★ ليش لازم skip_keywords هون كمان (مش بس لاحقاً بـ post_parser.py): لو منشور
+    فيديو/ريل عندو تعليقات، رابط التعليق (يلي فيه comment_id) بيحتوي كمان على
+    "/reel/" أو "/posts/" جوّاه — يعني بيطابق keyword عادي. من دون فلترة الـ skip
+    هون، الطلوع بالشجرة كان عم يوقف مبكر جداً عند أول جد صغير فيه بس رابط تعليق
+    (متل تعليق شخص عالفيديو)، قبل ما يوصل للجد الحقيقي يلي فيه رابط المنشور
+    الأساسي نفسه. النتيجة: الـ container يلي بيرجع لـ post_parser.py بيكون ناقص
+    (بس فيه روابط تعليقات/هاشتاغ)، فـ post_parser ما بيلاقي رابط منشور صالح ويرفض
+    البوست بالكامل (PARSE_REJECT reason=no_matching_post_link) رغم إنو البوست
+    موجود وصالح فعلياً — هاد بالضبط اللي كان عم يصير مع بوستات الفيديو/الريل.
 
     لو ما لقينا ولا anchor (يعني فيسبوك غيّر حتى نص الـ aria-label)، منرجع للطريقة
     القديمة (container_selectors) كـ fallback أخير، بس هاي مش المتوقع تنجح اليوم.
     """
     post_link_keywords = post_link_keywords or []
+    post_link_skip_keywords = post_link_skip_keywords or []
     aria_prefixes = post_action_aria_prefixes or ["Actions for this post"]
 
     aria_selector = ", ".join(f'div[aria-label^="{p}"]' for p in aria_prefixes)
@@ -96,21 +108,26 @@ async def find_post_elements(page, container_selectors: list[str], logger, post_
             try:
                 handle = await anchor.evaluate_handle(
                     """
-                    (anchorEl, keywords) => {
+                    (anchorEl, args) => {
+                        const { keywords, skipKeywords } = args;
                         let node = anchorEl;
                         for (let i = 0; i < 20 && node; i++) {
                             node = node.parentElement;
                             if (!node) break;
                             const links = Array.from(node.querySelectorAll('a[href]'));
-                            const hasPostLink = links.some(a =>
-                                keywords.some(k => (a.getAttribute('href') || '').includes(k))
-                            );
+                            const hasPostLink = links.some(a => {
+                                const href = a.getAttribute('href') || '';
+                                const matchesKeyword = keywords.some(k => href.includes(k));
+                                if (!matchesKeyword) return false;
+                                const matchesSkip = skipKeywords.some(sk => href.includes(sk));
+                                return !matchesSkip;
+                            });
                             if (hasPostLink) return node;
                         }
                         return null;
                     }
                     """,
-                    post_link_keywords,
+                    {"keywords": post_link_keywords, "skipKeywords": post_link_skip_keywords},
                 )
                 el = handle.as_element()
                 if el:
@@ -256,6 +273,7 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
 
             container_selectors = selectors["post_container"]
             _post_link_keywords = selectors.get("post_link_keywords", [])
+            _post_link_skip_keywords = selectors.get("post_link_skip_keywords", [])
             _post_action_aria_prefixes = selectors.get(
                 "post_action_aria_prefixes", ["Actions for this post"]
             )
@@ -267,6 +285,7 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
                         page, container_selectors, logger,
                         post_link_keywords=_post_link_keywords,
                         post_action_aria_prefixes=_post_action_aria_prefixes,
+                        post_link_skip_keywords=_post_link_skip_keywords,
                     )
 
                     for post_elem in raw_elements:
@@ -319,6 +338,7 @@ async def monitor_target(context, target_url, semaphore, http_session, *, db, te
                     page, container_selectors, logger,
                     post_link_keywords=_post_link_keywords,
                     post_action_aria_prefixes=_post_action_aria_prefixes,
+                    post_link_skip_keywords=_post_link_skip_keywords,
                 )
 
                 found_new_this_pass = False
