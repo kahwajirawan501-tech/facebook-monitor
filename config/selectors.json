@@ -1,17 +1,14 @@
 {
-  "_comment": "ملف محدث ومصحح ليتوافق مع أحدث واجهات فيسبوك (Comet DOM)",
+  "_comment": "هاد الملف بينفصل عن الكود عشان تقدر تحدّث selectors فيسبوك بدون ما تلمس الكود أو تعيد النشر. كل مفتاح بياخد قائمة selectors مرتبة من الأدق للأعم (fallback chain) — النظام بجرب كل واحد لحد ما ينجح.",
 
   "post_container": [
-    "div[data-visualcompletion='ignore-dynamic'] div.x1yztbdb.x1n2onr6",
     "div[role='feed'] > div",
+    "div[role='article']",
     "div[data-pagelet*='FeedUnit']"
   ],
 
-  "post_action_aria_prefixes": [
-    "Actions for this post",
-    "خيارات إضافية",
-    "More options"
-  ],
+  "_comment_post_action_aria_prefixes": "الاستراتيجية الأساسية للتعرف على منشور حقيقي (بديل موثوق لأنو role='feed' و role='article' و data-pagelet ماتوا كلياً بواجهة فيسبوك الحالية كمنشورات فعلية — role='article' لسا موجود بس أغلبه عناصر virtualized فاضية بدون محتوى). زر '...' (خيارات المنشور) على كل بوست حقيقي إله aria-label ثابت — بس تبيّن إنو **مش دايماً بالإنجليزي**: بعض الحسابات/الجلسات بترجع الواجهة بالعربي (\"الإجراءات لهذا المنشور بواسطة X\") بدل الإنجليزي (\"Actions for this post by X\"). لهيك لازم القائمة تحتوي كل الصيغ المعروفة مع بعض — أي وحدة منهم بتكفي (aria-label^= يطابق البداية بس).",
+  "post_action_aria_prefixes": ["Actions for this post", "الإجراءات لهذا المنشور"],
 
   "close_dialog_buttons": [
     "div[role='dialog'] div[aria-label='إغلاق']",
